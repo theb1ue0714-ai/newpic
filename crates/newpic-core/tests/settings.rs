@@ -1,12 +1,14 @@
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
 use newpic_core::settings::{
-    load_or_recover, migrate_json, ClipboardSettings, Hotkeys, ImageFormat,
-    JsonFileSettingsRepository, Language, NamingSettings, RecoveryNotice, SaveDirectory, Settings,
-    SettingsRepository, SettingsValidationError, Size, CURRENT_SCHEMA_VERSION,
+    load_or_recover, migrate_json, ClipboardSettings, CorruptionRecovery, Hotkeys, ImageFormat,
+    JsonFileSettingsRepository, Language, LoadSettingsError, NamingSettings, RecoveryNotice,
+    SaveDirectory, Settings, SettingsMigrationError, SettingsRepository, SettingsRepositoryError,
+    SettingsValidationError, Size, CURRENT_SCHEMA_VERSION,
 };
 
 #[test]
@@ -254,7 +256,12 @@ fn future_schema_is_preserved_without_save_or_backup() {
 
     let result = load_or_recover(&JsonFileSettingsRepository::new(&path));
 
-    assert!(result.is_err());
+    assert!(matches!(
+        result,
+        Err(LoadSettingsError::Migration(
+            SettingsMigrationError::UnsupportedSchema(2)
+        ))
+    ));
     assert_eq!(
         fs::read_to_string(&path).expect("read future settings"),
         original
@@ -378,7 +385,7 @@ fn concurrent_backup_callers_never_overwrite_an_existing_backup() {
             let barrier = Arc::clone(&barrier);
             thread::spawn(move || {
                 barrier.wait();
-                repository.backup_corrupted()
+                repository.recover_corrupted_if_unchanged("corrupt source", &Settings::default())
             })
         })
         .collect();
@@ -391,7 +398,13 @@ fn concurrent_backup_callers_never_overwrite_an_existing_backup() {
         fs::read_to_string(&sentinel_path).expect("read sentinel"),
         "existing backup"
     );
-    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Ok(CorruptionRecovery::Recovered { .. })))
+            .count(),
+        1
+    );
     let backups = backup_files(temp.path());
     assert_eq!(backups.len(), 2);
     let created = backups
@@ -409,8 +422,91 @@ fn backup_failure_does_not_create_an_empty_claim_file() {
     let temp = tempfile::tempdir().expect("temporary directory");
     let repository = JsonFileSettingsRepository::new(temp.path().join("missing.json"));
 
-    assert!(repository.backup_corrupted().is_err());
+    assert!(repository
+        .recover_corrupted_if_unchanged("missing", &Settings::default())
+        .is_err());
     assert_eq!(backup_files(temp.path()).len(), 0);
+}
+
+#[test]
+fn changed_source_after_corrupt_read_is_reloaded_without_backup_or_overwrite() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let path = temp.path().join("settings.json");
+    fs::write(&path, "{ corrupt original").expect("write corrupt source");
+    let replacement = Settings {
+        autostart: false,
+        ..Settings::default()
+    };
+    let repository = InterleavingRepository {
+        inner: JsonFileSettingsRepository::new(&path),
+        replacement: replacement.clone(),
+        replace_after_first_load: AtomicBool::new(true),
+    };
+
+    let outcome = load_or_recover(&repository).expect("replacement is reloaded");
+
+    assert_eq!(outcome.settings, replacement);
+    assert_eq!(outcome.notice, None);
+    assert_eq!(read_settings(&path), replacement);
+    assert_eq!(backup_files(temp.path()).len(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_backup_claim_preserves_source_and_existing_backup() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let path = temp.path().join("settings.json");
+    let existing_backup = temp.path().join("settings.corrupt.json");
+    fs::write(&path, "{ corrupt source").expect("write corrupt source");
+    fs::write(&existing_backup, "existing backup").expect("write existing backup");
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o555))
+        .expect("make parent read only");
+
+    let result = load_or_recover(&JsonFileSettingsRepository::new(&path));
+
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755))
+        .expect("restore parent permissions");
+    assert!(result.is_err());
+    assert_eq!(
+        fs::read_to_string(&path).expect("read preserved source"),
+        "{ corrupt source"
+    );
+    assert_eq!(
+        fs::read_to_string(existing_backup).expect("read existing backup"),
+        "existing backup"
+    );
+    assert!(!temp.path().join("settings.corrupt-1.json").exists());
+}
+
+struct InterleavingRepository {
+    inner: JsonFileSettingsRepository,
+    replacement: Settings,
+    replace_after_first_load: AtomicBool,
+}
+
+impl SettingsRepository for InterleavingRepository {
+    fn load(&self) -> Result<Option<String>, SettingsRepositoryError> {
+        let loaded = self.inner.load()?;
+        if self.replace_after_first_load.swap(false, Ordering::SeqCst) {
+            self.inner.save(&self.replacement)?;
+        }
+        Ok(loaded)
+    }
+
+    fn save(&self, settings: &Settings) -> Result<(), SettingsRepositoryError> {
+        self.inner.save(settings)
+    }
+
+    fn recover_corrupted_if_unchanged(
+        &self,
+        expected: &str,
+        replacement: &Settings,
+    ) -> Result<CorruptionRecovery, SettingsRepositoryError> {
+        self.inner
+            .recover_corrupted_if_unchanged(expected, replacement)
+    }
 }
 
 fn assert_repository<R: SettingsRepository>(_repository: &R) {}

@@ -1,13 +1,15 @@
-use std::fs::{self, File, OpenOptions};
+#[cfg(unix)]
+use std::fs::File;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
-static BACKUP_LOCK: Mutex<()> = Mutex::new(());
+const MAX_RECOVERY_RELOADS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
@@ -317,7 +319,20 @@ fn migrate_schema_zero(old: SchemaZeroSettings) -> Settings {
 pub trait SettingsRepository {
     fn load(&self) -> Result<Option<String>, SettingsRepositoryError>;
     fn save(&self, settings: &Settings) -> Result<(), SettingsRepositoryError>;
-    fn backup_corrupted(&self) -> Result<PathBuf, SettingsRepositoryError>;
+    /// Replaces a corrupt file only when its current bytes still equal
+    /// `expected`. Implementations must make the comparison, backup claim, and
+    /// replacement one cross-process critical section.
+    fn recover_corrupted_if_unchanged(
+        &self,
+        expected: &str,
+        replacement: &Settings,
+    ) -> Result<CorruptionRecovery, SettingsRepositoryError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CorruptionRecovery {
+    Recovered { backup_path: PathBuf },
+    SourceChanged { contents: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -354,39 +369,56 @@ impl JsonFileSettingsRepository {
         };
         parent.join(name)
     }
-}
 
-impl SettingsRepository for JsonFileSettingsRepository {
-    fn load(&self) -> Result<Option<String>, SettingsRepositoryError> {
-        match fs::read_to_string(&self.path) {
-            Ok(json) => Ok(Some(json)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.into()),
-        }
+    fn lock_path(&self) -> PathBuf {
+        let parent = nonempty_parent(&self.path);
+        let file_name = self
+            .path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("settings");
+        parent.join(format!(".{file_name}.lock"))
     }
 
-    fn save(&self, settings: &Settings) -> Result<(), SettingsRepositoryError> {
-        settings.validate()?;
+    fn with_exclusive_lock<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, SettingsRepositoryError>,
+    ) -> Result<T, SettingsRepositoryError> {
         let parent = nonempty_parent(&self.path);
         fs::create_dir_all(parent)?;
+        let lock_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.lock_path())?;
+        lock_file.lock_exclusive()?;
+        let result = operation();
+        drop(lock_file);
+        result
+    }
+
+    fn serialize(settings: &Settings) -> Result<Vec<u8>, SettingsRepositoryError> {
+        settings.validate()?;
         let mut json = serde_json::to_vec_pretty(settings)?;
         json.push(b'\n');
+        Ok(json)
+    }
 
+    fn save_bytes_unlocked(&self, bytes: &[u8]) -> Result<(), SettingsRepositoryError> {
+        let parent = nonempty_parent(&self.path);
         let mut temporary = tempfile::Builder::new()
             .prefix(".newpic-settings-")
             .tempfile_in(parent)?;
-        temporary.write_all(&json)?;
+        temporary.write_all(bytes)?;
         temporary.flush()?;
         temporary.as_file().sync_all()?;
         temporary.persist(&self.path).map_err(|error| error.error)?;
-        let _ = sync_directory(parent);
+        sync_directory_best_effort(parent);
         Ok(())
     }
 
-    fn backup_corrupted(&self) -> Result<PathBuf, SettingsRepositoryError> {
-        let _backup_guard = BACKUP_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    fn claim_corrupted_backup(&self, contents: &[u8]) -> Result<PathBuf, SettingsRepositoryError> {
         for sequence in 0_u64.. {
             let backup_path = self.corrupted_backup_path(sequence);
             let backup = OpenOptions::new()
@@ -399,18 +431,12 @@ impl SettingsRepository for JsonFileSettingsRepository {
                 Err(error) => return Err(error.into()),
             };
 
-            let backup_result = (|| -> io::Result<()> {
-                let mut source = File::open(&self.path)?;
-                io::copy(&mut source, &mut backup)?;
+            let write_result = (|| -> io::Result<()> {
+                backup.write_all(contents)?;
                 backup.flush()?;
-                backup.sync_all()?;
-                drop(source);
-                fs::remove_file(&self.path)?;
-                let _ = sync_directory(nonempty_parent(&self.path));
-                Ok(())
+                backup.sync_all()
             })();
-
-            if let Err(error) = backup_result {
+            if let Err(error) = write_result {
                 drop(backup);
                 let _ = fs::remove_file(&backup_path);
                 return Err(error.into());
@@ -421,21 +447,59 @@ impl SettingsRepository for JsonFileSettingsRepository {
     }
 }
 
+impl SettingsRepository for JsonFileSettingsRepository {
+    fn load(&self) -> Result<Option<String>, SettingsRepositoryError> {
+        match fs::read_to_string(&self.path) {
+            Ok(json) => Ok(Some(json)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn save(&self, settings: &Settings) -> Result<(), SettingsRepositoryError> {
+        let json = Self::serialize(settings)?;
+        self.with_exclusive_lock(|| self.save_bytes_unlocked(&json))
+    }
+
+    fn recover_corrupted_if_unchanged(
+        &self,
+        expected: &str,
+        replacement: &Settings,
+    ) -> Result<CorruptionRecovery, SettingsRepositoryError> {
+        let replacement = Self::serialize(replacement)?;
+        self.with_exclusive_lock(|| {
+            let current = fs::read_to_string(&self.path)?;
+            if current != expected {
+                return Ok(CorruptionRecovery::SourceChanged { contents: current });
+            }
+
+            let backup_path = self.claim_corrupted_backup(current.as_bytes())?;
+            if let Err(error) = self.save_bytes_unlocked(&replacement) {
+                let _ = fs::remove_file(&backup_path);
+                return Err(error);
+            }
+            Ok(CorruptionRecovery::Recovered { backup_path })
+        })
+    }
+}
+
 fn nonempty_parent(path: &Path) -> &Path {
     path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
 }
 
+/// Directory metadata sync is best-effort after the file itself has been
+/// synced and atomically persisted. Some supported filesystems reject
+/// directory fsync; that must not turn an already-committed save into a
+/// reported failure.
 #[cfg(unix)]
-fn sync_directory(path: &Path) -> io::Result<()> {
-    File::open(path)?.sync_all()
+fn sync_directory_best_effort(path: &Path) {
+    let _ = File::open(path).and_then(|directory| directory.sync_all());
 }
 
 #[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> io::Result<()> {
-    Ok(())
-}
+fn sync_directory_best_effort(_path: &Path) {}
 
 #[derive(Debug, Error)]
 pub enum SettingsRepositoryError {
@@ -464,12 +528,14 @@ pub enum LoadSettingsError {
     Repository(#[from] SettingsRepositoryError),
     #[error(transparent)]
     Migration(#[from] SettingsMigrationError),
+    #[error("settings changed repeatedly during corruption recovery")]
+    ConcurrentModification,
 }
 
 pub fn load_or_recover<R: SettingsRepository>(
     repository: &R,
 ) -> Result<LoadSettingsOutcome, LoadSettingsError> {
-    let Some(json) = repository.load()? else {
+    let Some(mut json) = repository.load()? else {
         let settings = Settings::default();
         repository.save(&settings)?;
         return Ok(LoadSettingsOutcome {
@@ -478,25 +544,33 @@ pub fn load_or_recover<R: SettingsRepository>(
         });
     };
 
-    match decode_json(&json) {
-        Ok(decoded) => {
-            if decoded.migrated {
-                repository.save(&decoded.settings)?;
+    for _ in 0..MAX_RECOVERY_RELOADS {
+        match decode_json(&json) {
+            Ok(decoded) => {
+                if decoded.migrated {
+                    repository.save(&decoded.settings)?;
+                }
+                return Ok(LoadSettingsOutcome {
+                    settings: decoded.settings,
+                    notice: None,
+                });
             }
-            Ok(LoadSettingsOutcome {
-                settings: decoded.settings,
-                notice: None,
-            })
+            Err(SettingsMigrationError::MalformedJson(_) | SettingsMigrationError::Invalid(_)) => {
+                let settings = Settings::default();
+                match repository.recover_corrupted_if_unchanged(&json, &settings)? {
+                    CorruptionRecovery::Recovered { backup_path } => {
+                        return Ok(LoadSettingsOutcome {
+                            settings,
+                            notice: Some(RecoveryNotice::CorruptedSettings { backup_path }),
+                        });
+                    }
+                    CorruptionRecovery::SourceChanged { contents } => json = contents,
+                }
+            }
+            Err(error @ SettingsMigrationError::UnsupportedSchema(_)) => {
+                return Err(error.into());
+            }
         }
-        Err(SettingsMigrationError::MalformedJson(_) | SettingsMigrationError::Invalid(_)) => {
-            let backup_path = repository.backup_corrupted()?;
-            let settings = Settings::default();
-            repository.save(&settings)?;
-            Ok(LoadSettingsOutcome {
-                settings,
-                notice: Some(RecoveryNotice::CorruptedSettings { backup_path }),
-            })
-        }
-        Err(error @ SettingsMigrationError::UnsupportedSchema(_)) => Err(error.into()),
     }
+    Err(LoadSettingsError::ConcurrentModification)
 }
