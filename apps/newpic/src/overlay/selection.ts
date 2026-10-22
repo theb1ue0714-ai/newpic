@@ -37,6 +37,8 @@ export type FixedInteraction =
     };
 
 export interface SelectionState {
+  ready: boolean;
+  activeDisplay: boolean;
   mode: SelectionMode;
   status: 'idle' | 'selecting' | 'completed' | 'cancelled';
   startPoint: Point | null;
@@ -60,6 +62,7 @@ export type SelectionAction =
       type: 'LOAD_OVERLAY';
       mode: SelectionMode;
       displayBounds: DisplayBounds;
+      activeDisplay: boolean;
       rect?: Rect;
     }
   | { type: 'INITIALIZE_FIXED'; rect: Rect }
@@ -70,6 +73,7 @@ export type SelectionAction =
     }
   | { type: 'POINTER_MOVE'; point: Point }
   | { type: 'POINTER_UP'; point?: Point }
+  | { type: 'POINTER_CANCEL' }
   | { type: 'CONFIRM' }
   | { type: 'CANCEL' }
   | { type: 'RESET' };
@@ -79,6 +83,8 @@ const DEFAULT_FIXED_PHYSICAL_SIZE: Size = { width: 800, height: 600 };
 export function initialSelectionState(options: InitialSelectionOptions): SelectionState {
   const fixedSize = options.fixedSize ?? DEFAULT_FIXED_PHYSICAL_SIZE;
   return {
+    ready: false,
+    activeDisplay: false,
     mode: options.mode,
     status: 'idle',
     startPoint: null,
@@ -231,16 +237,22 @@ export function selectionReducer(
   state: SelectionState,
   action: SelectionAction
 ): SelectionState {
+  if (action.type !== 'LOAD_OVERLAY' && action.type !== 'RESET' && !state.ready) {
+    return state;
+  }
+
   switch (action.type) {
     case 'LOAD_OVERLAY': {
       const currentRect =
-        action.mode === 'fixed_size'
+        action.mode === 'fixed_size' && action.activeDisplay
           ? action.rect
             ? clampFixedRect(action.rect, action.displayBounds)
             : centeredDefaultFixedRect(action.displayBounds)
           : null;
       return {
         ...state,
+        ready: true,
+        activeDisplay: action.mode === 'free_region' || action.activeDisplay,
         mode: action.mode,
         status: 'idle',
         startPoint: null,
@@ -252,7 +264,7 @@ export function selectionReducer(
     }
 
     case 'INITIALIZE_FIXED': {
-      if (state.mode !== 'fixed_size') {
+      if (state.mode !== 'fixed_size' || !state.activeDisplay) {
         return state;
       }
       return {
@@ -265,7 +277,7 @@ export function selectionReducer(
 
     case 'POINTER_DOWN': {
       if (state.mode === 'fixed_size') {
-        if (!state.currentRect || !action.target) {
+        if (!state.activeDisplay || !state.currentRect || !action.target) {
           return state;
         }
         const interaction: FixedInteraction =
@@ -360,8 +372,24 @@ export function selectionReducer(
       };
     }
 
+    case 'POINTER_CANCEL': {
+      if (!state.interaction) {
+        return state;
+      }
+      return {
+        ...state,
+        status: 'idle',
+        interaction: null,
+        currentPoint: null,
+      };
+    }
+
     case 'CONFIRM': {
-      if (state.mode !== 'fixed_size' || !state.currentRect) {
+      if (
+        state.mode !== 'fixed_size' ||
+        !state.activeDisplay ||
+        !state.currentRect
+      ) {
         return state;
       }
       return {
@@ -386,6 +414,8 @@ export function selectionReducer(
     case 'RESET': {
       return {
         ...state,
+        ready: false,
+        activeDisplay: false,
         status: 'idle',
         currentRect: null,
         startPoint: null,

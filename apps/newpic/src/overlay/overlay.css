@@ -62,11 +62,6 @@ body,
   touch-action: none;
 }
 
-.resize-handle:focus-visible {
-  outline: 2px solid #ffffff;
-  outline-offset: 1px;
-}
-
 .resize-handle--n,
 .resize-handle--s {
   right: 7px;
@@ -139,8 +134,8 @@ body,
 
 .dimension-badge {
   position: absolute;
-  bottom: -28px;
-  right: 0;
+  width: 96px;
+  height: 24px;
   background: rgba(17, 24, 39, 0.92);
   color: #ffffff;
   font-size: 11px;
@@ -152,6 +147,9 @@ body,
   font-variant-numeric: tabular-nums;
   border: 1px solid rgba(255, 255, 255, 0.15);
   z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .overlay-instruction {

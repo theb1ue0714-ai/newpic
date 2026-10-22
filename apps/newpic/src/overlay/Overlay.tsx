@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useReducer } from 'react';
+import React, { useCallback, useEffect, useReducer, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
   calculateFixedRect,
@@ -28,22 +28,43 @@ interface OverlayInfo {
     height: number;
   };
   scale_factor: number;
+  active_display: boolean;
   initial_rect?: Rect;
 }
 
-const RESIZE_HANDLES: ReadonlyArray<{
-  handle: ResizeHandle;
-  label: string;
-}> = [
-  { handle: 'n', label: '위쪽 크기 조절' },
-  { handle: 'ne', label: '오른쪽 위 크기 조절' },
-  { handle: 'e', label: '오른쪽 크기 조절' },
-  { handle: 'se', label: '오른쪽 아래 크기 조절' },
-  { handle: 's', label: '아래쪽 크기 조절' },
-  { handle: 'sw', label: '왼쪽 아래 크기 조절' },
-  { handle: 'w', label: '왼쪽 크기 조절' },
-  { handle: 'nw', label: '왼쪽 위 크기 조절' },
+const RESIZE_HANDLES: ReadonlyArray<ResizeHandle> = [
+  'n',
+  'ne',
+  'e',
+  'se',
+  's',
+  'sw',
+  'w',
+  'nw',
 ];
+
+const DIMENSION_BADGE_WIDTH = 96;
+const DIMENSION_BADGE_HEIGHT = 24;
+const DIMENSION_BADGE_GAP = 6;
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.max(minimum, Math.min(value, maximum));
+}
+
+function dimensionBadgePosition(rect: Rect, displayBounds: DisplayBounds) {
+  const display = localLogicalDisplaySize(displayBounds);
+  const left = clamp(
+    rect.x + rect.width - DIMENSION_BADGE_WIDTH,
+    0,
+    Math.max(0, display.width - DIMENSION_BADGE_WIDTH)
+  );
+  const below = rect.y + rect.height + DIMENSION_BADGE_GAP;
+  const top =
+    below + DIMENSION_BADGE_HEIGHT <= display.height
+      ? below
+      : Math.max(0, rect.y - DIMENSION_BADGE_HEIGHT - DIMENSION_BADGE_GAP);
+  return { left, top };
+}
 
 function fixedInitialRect(info: OverlayInfo, displayBounds: DisplayBounds): Rect {
   if (info.initial_rect) {
@@ -74,6 +95,8 @@ function pointerTarget(element: EventTarget | null): 'rect' | ResizeHandle | und
 }
 
 export function Overlay() {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const activePointerId = useRef<number | null>(null);
   const [state, dispatch] = useReducer(
     selectionReducer,
     {
@@ -108,8 +131,10 @@ export function Overlay() {
           type: 'LOAD_OVERLAY',
           mode: info.request.mode,
           displayBounds,
+          activeDisplay:
+            info.request.mode === 'free_region' || info.active_display === true,
           rect:
-            info.request.mode === 'fixed_size'
+            info.request.mode === 'fixed_size' && info.active_display === true
               ? fixedInitialRect(info, displayBounds)
               : undefined,
         });
@@ -123,9 +148,26 @@ export function Overlay() {
     };
   }, []);
 
+  const releaseActivePointer = useCallback(() => {
+    const pointerId = activePointerId.current;
+    const container = containerRef.current;
+    if (
+      pointerId !== null &&
+      container &&
+      container.hasPointerCapture(pointerId)
+    ) {
+      container.releasePointerCapture(pointerId);
+    }
+    activePointerId.current = null;
+  }, []);
+
   const handlePointerDown = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
-      if (event.button !== 0) {
+      if (
+        !state.ready ||
+        !state.activeDisplay ||
+        event.button !== 0
+      ) {
         return;
       }
       const target = state.mode === 'fixed_size' ? pointerTarget(event.target) : undefined;
@@ -133,52 +175,94 @@ export function Overlay() {
         return;
       }
       event.currentTarget.setPointerCapture(event.pointerId);
+      activePointerId.current = event.pointerId;
       dispatch({
         type: 'POINTER_DOWN',
         point: { x: event.clientX, y: event.clientY },
         target,
       });
     },
-    [state.mode]
+    [state.activeDisplay, state.mode, state.ready]
   );
 
-  const handlePointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    dispatch({
-      type: 'POINTER_MOVE',
-      point: { x: event.clientX, y: event.clientY },
-    });
-  }, []);
+  const handlePointerMove = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (!state.ready || !state.activeDisplay) {
+        return;
+      }
+      dispatch({
+        type: 'POINTER_MOVE',
+        point: { x: event.clientX, y: event.clientY },
+      });
+    },
+    [state.activeDisplay, state.ready]
+  );
 
-  const handlePointerUp = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0) {
+  const handlePointerUp = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (!state.ready || !state.activeDisplay || event.button !== 0) {
+        return;
+      }
+      dispatch({
+        type: 'POINTER_UP',
+        point: { x: event.clientX, y: event.clientY },
+      });
+      releaseActivePointer();
+    },
+    [releaseActivePointer, state.activeDisplay, state.ready]
+  );
+
+  const handlePointerCancel = useCallback(() => {
+    if (!state.ready) {
       return;
     }
-    dispatch({
-      type: 'POINTER_UP',
-      point: { x: event.clientX, y: event.clientY },
-    });
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-  }, []);
+    dispatch({ type: 'POINTER_CANCEL' });
+    releaseActivePointer();
+  }, [releaseActivePointer, state.ready]);
+
+  const handleLostPointerCapture = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (activePointerId.current === event.pointerId) {
+        activePointerId.current = null;
+      }
+      if (state.ready) {
+        dispatch({ type: 'POINTER_CANCEL' });
+      }
+    },
+    [state.ready]
+  );
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (!state.ready || !state.activeDisplay) {
+        return;
+      }
       if (event.key === 'Escape') {
         event.preventDefault();
+        releaseActivePointer();
         dispatch({ type: 'CANCEL' });
         invoke('cancel_selection').catch(() => {});
-      } else if (event.key === 'Enter' && state.mode === 'fixed_size') {
+      } else if (
+        event.key === 'Enter' &&
+        state.mode === 'fixed_size' &&
+        state.activeDisplay
+      ) {
         event.preventDefault();
+        releaseActivePointer();
         dispatch({ type: 'CONFIRM' });
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [state.mode]);
+  }, [releaseActivePointer, state.activeDisplay, state.mode, state.ready]);
 
   useEffect(() => {
-    if (state.status === 'completed' && state.lastCompletedRegion) {
+    if (
+      state.ready &&
+      state.activeDisplay &&
+      state.status === 'completed' &&
+      state.lastCompletedRegion
+    ) {
       const physicalRect = logicalToPhysical(
         state.lastCompletedRegion,
         state.displayBounds
@@ -187,56 +271,82 @@ export function Overlay() {
         console.error('Failed to complete selection:', error);
       });
     }
-  }, [state.status, state.lastCompletedRegion, state.displayBounds]);
+  }, [
+    state.activeDisplay,
+    state.displayBounds,
+    state.lastCompletedRegion,
+    state.ready,
+    state.status,
+  ]);
 
   const currentRect = state.currentRect;
+  const badgePosition = currentRect
+    ? dimensionBadgePosition(currentRect, state.displayBounds)
+    : null;
 
   return (
     <div
+      ref={containerRef}
       className={`overlay-container overlay-container--${state.mode}`}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerCancel}
+      onLostPointerCapture={handleLostPointerCapture}
       data-testid="overlay-container"
+      data-ready={state.ready}
+      data-active-display={state.activeDisplay}
     >
-      <div className="overlay-instruction">
-        {state.mode === 'fixed_size'
-          ? '드래그하여 이동 · 모서리/테두리로 크기 조절 · Enter 캡처 · Esc 취소'
-          : '마우스를 드래그하여 영역을 선택하세요 · Esc 취소'}
-      </div>
+      {!state.ready ? (
+        <div className="overlay-instruction">오버레이 준비 중</div>
+      ) : state.activeDisplay ? (
+        <div className="overlay-instruction">
+          {state.mode === 'fixed_size'
+            ? '드래그하여 이동 · 모서리/테두리로 크기 조절 · Enter 캡처 · Esc 취소'
+            : '마우스를 드래그하여 영역을 선택하세요 · Esc 취소'}
+        </div>
+      ) : null}
 
-      {currentRect && (
-        <div
-          className={`selection-cutout ${
-            state.mode === 'fixed_size' ? 'selection-cutout--fixed' : ''
-          }`}
-          style={{
-            left: `${currentRect.x}px`,
-            top: `${currentRect.y}px`,
-            width: `${currentRect.width}px`,
-            height: `${currentRect.height}px`,
-          }}
-          data-testid="selection-cutout"
-        >
-          {state.mode === 'fixed_size' && (
-            <>
-              <div
-                className="fixed-move-surface"
-                data-selection-target="rect"
-                aria-label="캡처 영역 이동"
-              />
-              {RESIZE_HANDLES.map(({ handle, label }) => (
-                <button
-                  key={handle}
-                  type="button"
-                  className={`resize-handle resize-handle--${handle}`}
-                  data-handle={handle}
-                  aria-label={label}
+      {currentRect && badgePosition && (
+        <>
+          <div
+            className={`selection-cutout ${
+              state.mode === 'fixed_size' ? 'selection-cutout--fixed' : ''
+            }`}
+            style={{
+              left: `${currentRect.x}px`,
+              top: `${currentRect.y}px`,
+              width: `${currentRect.width}px`,
+              height: `${currentRect.height}px`,
+            }}
+            data-testid="selection-cutout"
+          >
+            {state.mode === 'fixed_size' && (
+              <>
+                <div
+                  className="fixed-move-surface"
+                  data-selection-target="rect"
+                  aria-label="캡처 영역 이동"
                 />
-              ))}
-            </>
-          )}
-          <div className="dimension-badge" data-testid="dimension-badge">
+                {RESIZE_HANDLES.map((handle) => (
+                  <div
+                    key={handle}
+                    className={`resize-handle resize-handle--${handle}`}
+                    data-handle={handle}
+                    aria-hidden="true"
+                  />
+                ))}
+              </>
+            )}
+          </div>
+          <div
+            className="dimension-badge"
+            data-testid="dimension-badge"
+            style={{
+              left: `${badgePosition.left}px`,
+              top: `${badgePosition.top}px`,
+            }}
+          >
             {Math.max(
               1,
               Math.round(currentRect.width * state.displayBounds.scaleFactor)
@@ -247,7 +357,7 @@ export function Overlay() {
               Math.round(currentRect.height * state.displayBounds.scaleFactor)
             )}
           </div>
-        </div>
+        </>
       )}
     </div>
   );

@@ -21,7 +21,13 @@ describe('selection reducer and coordinate helpers', () => {
   function loadFixed(rect?: Rect, displayBounds = defaultDisplay) {
     return selectionReducer(
       initialSelectionState({ mode: 'free_region', displayBounds: defaultDisplay }),
-      { type: 'LOAD_OVERLAY', mode: 'fixed_size', displayBounds, rect }
+      {
+        type: 'LOAD_OVERLAY',
+        mode: 'fixed_size',
+        displayBounds,
+        activeDisplay: true,
+        rect,
+      }
     );
   }
 
@@ -52,6 +58,49 @@ describe('selection reducer and coordinate helpers', () => {
     expect(state.status).toBe('idle');
     expect(state.currentRect).toEqual({ x: 120, y: 80, width: 640, height: 480 });
     expect(state.interaction).toBeNull();
+    expect(state.ready).toBe(true);
+    expect(state.activeDisplay).toBe(true);
+  });
+
+  it('ignores input until overlay metadata has loaded', () => {
+    const initial = initialSelectionState({
+      mode: 'free_region',
+      displayBounds: defaultDisplay,
+    });
+    const pressed = selectionReducer(initial, {
+      type: 'POINTER_DOWN',
+      point: { x: 100, y: 100 },
+    });
+    const confirmed = selectionReducer(pressed, { type: 'CONFIRM' });
+
+    expect(initial.ready).toBe(false);
+    expect(pressed).toBe(initial);
+    expect(confirmed).toBe(initial);
+  });
+
+  it('does not initialize or confirm F9 on an inactive display', () => {
+    let state = selectionReducer(
+      initialSelectionState({ mode: 'free_region', displayBounds: defaultDisplay }),
+      {
+        type: 'LOAD_OVERLAY',
+        mode: 'fixed_size',
+        displayBounds: defaultDisplay,
+        activeDisplay: false,
+        rect: { x: 100, y: 100, width: 800, height: 600 },
+      }
+    );
+
+    expect(state.ready).toBe(true);
+    expect(state.activeDisplay).toBe(false);
+    expect(state.currentRect).toBeNull();
+    state = selectionReducer(state, {
+      type: 'POINTER_DOWN',
+      point: { x: 200, y: 200 },
+      target: 'rect',
+    });
+    state = selectionReducer(state, { type: 'CONFIRM' });
+    expect(state.status).toBe('idle');
+    expect(state.lastCompletedRegion).toBeNull();
   });
 
   it('centers and clamps the default 800x600 F9 rectangle when none is supplied', () => {
@@ -179,6 +228,24 @@ describe('selection reducer and coordinate helpers', () => {
     expect(state.currentRect).toEqual({ x: 200, y: 200, width: 800, height: 600 });
   });
 
+  it('ends F9 interaction on pointer cancellation without changing the rectangle', () => {
+    let state = loadFixed({ x: 100, y: 100, width: 800, height: 600 });
+    state = selectionReducer(state, {
+      type: 'POINTER_DOWN',
+      point: { x: 150, y: 150 },
+      target: 'rect',
+    });
+    state = selectionReducer(state, { type: 'POINTER_CANCEL' });
+    state = selectionReducer(state, {
+      type: 'POINTER_MOVE',
+      point: { x: 500, y: 500 },
+    });
+
+    expect(state.status).toBe('idle');
+    expect(state.interaction).toBeNull();
+    expect(state.currentRect).toEqual({ x: 100, y: 100, width: 800, height: 600 });
+  });
+
   it('completes F9 only through CONFIRM when a valid rectangle exists', () => {
     const state = selectionReducer(
       loadFixed({ x: 100, y: 100, width: 800, height: 600 }),
@@ -206,6 +273,7 @@ describe('selection reducer and coordinate helpers', () => {
       type: 'LOAD_OVERLAY',
       mode: 'fixed_size',
       displayBounds: defaultDisplay,
+      activeDisplay: true,
       rect: { x: 500, y: 400, width: 600, height: 500 },
     });
     state = selectionReducer(state, { type: 'CANCEL' });
@@ -216,10 +284,18 @@ describe('selection reducer and coordinate helpers', () => {
   });
 
   it('keeps F7 drag completion on pointer-up unchanged', () => {
-    let state = initialSelectionState({
-      mode: 'free_region',
-      displayBounds: defaultDisplay,
-    });
+    let state = selectionReducer(
+      initialSelectionState({
+        mode: 'free_region',
+        displayBounds: defaultDisplay,
+      }),
+      {
+        type: 'LOAD_OVERLAY',
+        mode: 'free_region',
+        displayBounds: defaultDisplay,
+        activeDisplay: true,
+      }
+    );
     state = selectionReducer(state, {
       type: 'POINTER_DOWN',
       point: { x: 400, y: 300 },

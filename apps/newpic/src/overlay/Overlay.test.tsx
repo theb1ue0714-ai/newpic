@@ -1,4 +1,11 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { invokeMock } = vi.hoisted(() => ({
@@ -24,6 +31,7 @@ const fixedOverlayInfo = {
     height: 1440,
   },
   scale_factor: 2,
+  active_display: true,
   initial_rect: {
     x: -2360,
     y: 480,
@@ -32,7 +40,25 @@ const fixedOverlayInfo = {
   },
 };
 
-describe('F9 overlay', () => {
+function installPointerCapture(container: HTMLElement) {
+  let capturedPointer: number | null = null;
+  const setPointerCapture = vi.fn((pointerId: number) => {
+    capturedPointer = pointerId;
+  });
+  const releasePointerCapture = vi.fn((pointerId: number) => {
+    if (capturedPointer === pointerId) {
+      capturedPointer = null;
+    }
+  });
+  Object.assign(container, {
+    setPointerCapture,
+    releasePointerCapture,
+    hasPointerCapture: (pointerId: number) => capturedPointer === pointerId,
+  });
+  return { setPointerCapture, releasePointerCapture };
+}
+
+describe('capture overlay', () => {
   beforeEach(() => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === 'get_overlay_info') {
@@ -60,66 +86,248 @@ describe('F9 overlay', () => {
     expect(screen.getByTestId('dimension-badge')).toHaveTextContent('800 × 600');
   });
 
-  it('renders a move surface, eight semantic handles, and the Enter instruction', async () => {
+  it('uses pointer-only resize handles and targets a real east resize', async () => {
     render(<Overlay />);
+    const container = screen.getByTestId('overlay-container');
+    const pointerCapture = installPointerCapture(container);
     await screen.findByTestId('selection-cutout');
 
-    expect(screen.getByLabelText('캡처 영역 이동')).toBeVisible();
-    for (const label of [
-      '위쪽 크기 조절',
-      '오른쪽 위 크기 조절',
-      '오른쪽 크기 조절',
-      '오른쪽 아래 크기 조절',
-      '아래쪽 크기 조절',
-      '왼쪽 아래 크기 조절',
-      '왼쪽 크기 조절',
-      '왼쪽 위 크기 조절',
-    ]) {
-      expect(screen.getByRole('button', { name: label })).toBeVisible();
+    const handles = container.querySelectorAll<HTMLElement>('[data-handle]');
+    expect(handles).toHaveLength(8);
+    for (const handle of handles) {
+      expect(handle.tagName).toBe('DIV');
+      expect(handle).toHaveAttribute('aria-hidden', 'true');
     }
-    expect(screen.getByText(/드래그하여 이동/)).toHaveTextContent(
-      '드래그하여 이동 · 모서리/테두리로 크기 조절 · Enter 캡처 · Esc 취소'
-    );
-  });
 
-  it('captures the pointer while moving and completes only after Enter', async () => {
-    render(<Overlay />);
-    const moveSurface = await screen.findByLabelText('캡처 영역 이동');
-    const container = screen.getByTestId('overlay-container');
-    const setPointerCapture = vi.fn();
-    const releasePointerCapture = vi.fn();
-    Object.assign(container, {
-      setPointerCapture,
-      releasePointerCapture,
-      hasPointerCapture: () => true,
-    });
-
-    fireEvent.pointerDown(moveSurface, {
+    const east = container.querySelector<HTMLElement>('[data-handle="e"]');
+    expect(east).not.toBeNull();
+    fireEvent.pointerDown(east!, {
       button: 0,
       pointerId: 7,
-      clientX: 150,
+      clientX: 500,
       clientY: 200,
     });
     fireEvent.pointerMove(container, {
       pointerId: 7,
-      clientX: 250,
-      clientY: 300,
+      clientX: 550,
+      clientY: 200,
     });
-    fireEvent.pointerUp(container, {
-      button: 0,
-      pointerId: 7,
-      clientX: 250,
-      clientY: 300,
-    });
-
-    expect(setPointerCapture).toHaveBeenCalledWith(7);
-    expect(releasePointerCapture).toHaveBeenCalledWith(7);
+    expect(pointerCapture.setPointerCapture).toHaveBeenCalledWith(7);
     expect(invokeMock).not.toHaveBeenCalledWith('complete_selection', expect.anything());
 
     fireEvent.keyDown(window, { key: 'Enter' });
+    expect(pointerCapture.releasePointerCapture).toHaveBeenCalledWith(7);
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith('complete_selection', {
-        rect: { x: -2160, y: 680, width: 800, height: 600 },
+        rect: { x: -2360, y: 480, width: 900, height: 600 },
+      });
+    });
+  });
+
+  it('shows and completes F9 on exactly one active display overlay', async () => {
+    const infos = [
+      fixedOverlayInfo,
+      {
+        ...fixedOverlayInfo,
+        display_bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+        scale_factor: 1,
+        active_display: false,
+        initial_rect: undefined,
+      },
+    ];
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'get_overlay_info') {
+        return infos.shift();
+      }
+      return undefined;
+    });
+
+    render(
+      <>
+        <Overlay />
+        <Overlay />
+      </>
+    );
+
+    await waitFor(() => {
+      expect(screen.getAllByText(/Enter 캡처/)).toHaveLength(1);
+    });
+    expect(screen.getAllByTestId('selection-cutout')).toHaveLength(1);
+
+    fireEvent.keyDown(window, { key: 'Enter' });
+    await waitFor(() => {
+      expect(
+        invokeMock.mock.calls.filter(([command]) => command === 'complete_selection')
+      ).toHaveLength(1);
+    });
+  });
+
+  it('does not default a missing fixed-mode active-display flag to true', async () => {
+    const { active_display: _activeDisplay, ...withoutActiveDisplay } = fixedOverlayInfo;
+    invokeMock.mockResolvedValue(withoutActiveDisplay);
+    render(<Overlay />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('overlay-container')).toHaveAttribute(
+        'data-ready',
+        'true'
+      );
+    });
+    expect(screen.getByTestId('overlay-container')).toHaveAttribute(
+      'data-active-display',
+      'false'
+    );
+    expect(screen.queryByTestId('selection-cutout')).not.toBeInTheDocument();
+    fireEvent.keyDown(window, { key: 'Enter' });
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(invokeMock).not.toHaveBeenCalledWith('complete_selection', expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith('cancel_selection');
+  });
+
+  it('ignores pointer and keyboard input while overlay metadata is loading', async () => {
+    let resolveInfo!: (value: typeof fixedOverlayInfo) => void;
+    const deferred = new Promise<typeof fixedOverlayInfo>((resolve) => {
+      resolveInfo = resolve;
+    });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'get_overlay_info') {
+        return deferred;
+      }
+      return Promise.resolve(undefined);
+    });
+    render(<Overlay />);
+    const container = screen.getByTestId('overlay-container');
+    installPointerCapture(container);
+    expect(container).toHaveAttribute('data-ready', 'false');
+
+    fireEvent.pointerDown(container, {
+      button: 0,
+      pointerId: 4,
+      clientX: 10,
+      clientY: 10,
+    });
+    fireEvent.pointerMove(container, { pointerId: 4, clientX: 200, clientY: 200 });
+    fireEvent.pointerUp(container, {
+      button: 0,
+      pointerId: 4,
+      clientX: 200,
+      clientY: 200,
+    });
+    fireEvent.keyDown(window, { key: 'Enter' });
+    fireEvent.keyDown(window, { key: 'Escape' });
+
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(invokeMock).toHaveBeenCalledWith('get_overlay_info');
+    expect(screen.queryByTestId('selection-cutout')).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveInfo(fixedOverlayInfo);
+      await deferred;
+    });
+    expect(await screen.findByTestId('selection-cutout')).toBeVisible();
+  });
+
+  it('keeps the dimension badge visible when the region touches every display edge', async () => {
+    invokeMock.mockResolvedValue({
+      ...fixedOverlayInfo,
+      initial_rect: { x: -2560, y: 180, width: 2560, height: 1440 },
+    });
+    render(<Overlay />);
+
+    const badge = await screen.findByTestId('dimension-badge');
+    expect(badge).toHaveStyle({ left: '1184px', top: '0px' });
+    expect(badge).toHaveTextContent('2560 × 1440');
+  });
+
+  it('releases pointer capture and cancels through Escape IPC', async () => {
+    render(<Overlay />);
+    const moveSurface = await screen.findByLabelText('캡처 영역 이동');
+    const container = screen.getByTestId('overlay-container');
+    const pointerCapture = installPointerCapture(container);
+    fireEvent.pointerDown(moveSurface, {
+      button: 0,
+      pointerId: 9,
+      clientX: 150,
+      clientY: 200,
+    });
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+
+    expect(pointerCapture.releasePointerCapture).toHaveBeenCalledWith(9);
+    expect(invokeMock).toHaveBeenCalledWith('cancel_selection');
+    expect(screen.queryByTestId('selection-cutout')).not.toBeInTheDocument();
+  });
+
+  it.each(['pointerCancel', 'lostPointerCapture'] as const)(
+    'clears dragging after %s',
+    async (eventName) => {
+      render(<Overlay />);
+      const moveSurface = await screen.findByLabelText('캡처 영역 이동');
+      const container = screen.getByTestId('overlay-container');
+      const pointerCapture = installPointerCapture(container);
+      fireEvent.pointerDown(moveSurface, {
+        button: 0,
+        pointerId: 11,
+        clientX: 150,
+        clientY: 200,
+      });
+      fireEvent[eventName](container, { pointerId: 11 });
+      fireEvent.pointerMove(container, {
+        pointerId: 11,
+        clientX: 350,
+        clientY: 400,
+      });
+      fireEvent.keyDown(window, { key: 'Enter' });
+
+      await waitFor(() => {
+        expect(invokeMock).toHaveBeenCalledWith('complete_selection', {
+          rect: { x: -2360, y: 480, width: 800, height: 600 },
+        });
+      });
+      if (eventName === 'pointerCancel') {
+        expect(pointerCapture.releasePointerCapture).toHaveBeenCalledWith(11);
+      }
+    }
+  );
+
+  it('keeps F7 pointer-up completion after metadata loads', async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'get_overlay_info') {
+        return {
+          request: { action: 'region', mode: 'free_region' as const },
+          display_bounds: fixedOverlayInfo.display_bounds,
+          scale_factor: 2,
+          active_display: false,
+        };
+      }
+      return undefined;
+    });
+    render(<Overlay />);
+    await screen.findByText(/영역을 선택하세요/);
+    const container = screen.getByTestId('overlay-container');
+    installPointerCapture(container);
+
+    fireEvent.pointerDown(container, {
+      button: 0,
+      pointerId: 12,
+      clientX: 10,
+      clientY: 20,
+    });
+    fireEvent.pointerMove(container, {
+      pointerId: 12,
+      clientX: 110,
+      clientY: 70,
+    });
+    fireEvent.pointerUp(container, {
+      button: 0,
+      pointerId: 12,
+      clientX: 110,
+      clientY: 70,
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('complete_selection', {
+        rect: { x: -2540, y: 220, width: 200, height: 100 },
       });
     });
   });
