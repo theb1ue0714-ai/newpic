@@ -1,7 +1,4 @@
 use std::collections::HashSet;
-use std::fs;
-use std::sync::{Arc, Barrier};
-use std::thread;
 
 use newpic_core::naming::{render_sequence, NameAllocator, NamingContext, NamingError};
 
@@ -21,48 +18,12 @@ fn sequence_starts_at_three_digits_and_expands_beyond_minimum_width() {
 }
 
 #[test]
-fn allocator_skips_existing_targets_and_sequence_gaps_are_reusable() {
+fn candidate_paths_are_deterministic_and_unique() {
     let temp = tempfile::tempdir().expect("temporary directory");
-    fs::write(temp.path().join("001.png"), b"first").expect("write first capture");
-    fs::write(temp.path().join("003.png"), b"third").expect("write third capture");
-
-    let reservation = allocator("%c")
-        .expect("valid allocator")
-        .reserve(temp.path())
-        .expect("reserve gap");
-
-    assert_eq!(reservation.path(), temp.path().join("002.png"));
-    assert_eq!(fs::read(temp.path().join("001.png")).unwrap(), b"first");
-    assert_eq!(fs::read(temp.path().join("003.png")).unwrap(), b"third");
-}
-
-#[test]
-fn concurrent_reservations_are_exclusive_and_unique() {
-    let temp = tempfile::tempdir().expect("temporary directory");
-    let directory = temp.path().to_path_buf();
-    let allocator = Arc::new(allocator("%c").expect("valid allocator"));
-    let barrier = Arc::new(Barrier::new(16));
-
-    let handles: Vec<_> = (0..16)
-        .map(|_| {
-            let directory = directory.clone();
-            let allocator = Arc::clone(&allocator);
-            let barrier = Arc::clone(&barrier);
-            thread::spawn(move || {
-                barrier.wait();
-                let reservation = allocator.reserve(&directory).expect("reserve name");
-                let path = reservation.path().to_path_buf();
-                barrier.wait();
-                (path, reservation)
-            })
-        })
+    let allocator = allocator("%c").expect("valid allocator");
+    let paths: HashSet<_> = (1..=16)
+        .map(|sequence| allocator.path_for(temp.path(), sequence).unwrap())
         .collect();
-
-    let reservations: Vec<_> = handles
-        .into_iter()
-        .map(|handle| handle.join().expect("reservation thread"))
-        .collect();
-    let paths: HashSet<_> = reservations.iter().map(|(path, _)| path.clone()).collect();
 
     assert_eq!(paths.len(), 16);
 }
@@ -118,15 +79,13 @@ fn path_separators_dot_names_controls_and_platform_invalid_names_are_rejected() 
     }
 }
 #[test]
-fn an_existing_fixed_target_is_never_reserved_or_overwritten() {
-    let temp = tempfile::tempdir().expect("temporary directory");
-    let target = temp.path().join("capture.png");
-    fs::write(&target, b"sentinel bytes").expect("write sentinel");
+fn filename_length_uses_the_target_limit_not_internal_temporary_prefixes() {
+    let allowed = "a".repeat(251);
+    let too_long = "a".repeat(252);
 
-    let result = allocator("capture")
-        .expect("valid fixed name")
-        .reserve(temp.path());
-
-    assert!(matches!(result, Err(NamingError::NameUnavailable)));
-    assert_eq!(fs::read(target).unwrap(), b"sentinel bytes");
+    assert!(allocator(&allowed).is_ok());
+    assert!(matches!(
+        allocator(&too_long),
+        Err(NamingError::InvalidFilename(_))
+    ));
 }

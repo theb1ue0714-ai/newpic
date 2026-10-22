@@ -5,11 +5,11 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 use newpic_core::settings::{
-    load_or_recover, migrate_json, ClipboardSettings, ConditionalSave, CorruptionRecovery,
-    ExpectedSettingsState, Hotkeys, ImageFormat, JsonFileSettingsRepository, Language,
-    LoadSettingsError, NamingSettings, RecoveryNotice, SaveDirectory, Settings,
-    SettingsMigrationError, SettingsRepository, SettingsRepositoryError, SettingsValidationError,
-    Size, CURRENT_SCHEMA_VERSION,
+    load_or_recover, migrate_json, validate_custom_save_directory_for_platform, ClipboardSettings,
+    ConditionalSave, CorruptionRecovery, ExpectedSettingsState, Hotkeys, ImageFormat,
+    JsonFileSettingsRepository, Language, LoadSettingsError, NamingSettings, RecoveryNotice,
+    SaveDirectory, SavePathPlatform, Settings, SettingsMigrationError, SettingsRepository,
+    SettingsRepositoryError, SettingsValidationError, Size, CURRENT_SCHEMA_VERSION,
 };
 
 #[test]
@@ -159,6 +159,71 @@ fn validation_accepts_a_normal_absolute_custom_save_directory() {
     settings.save.directory = SaveDirectory::Custom(std::env::temp_dir().join("NewPic captures"));
 
     assert_eq!(settings.validate(), Ok(()));
+}
+
+#[test]
+fn windows_custom_path_validation_rejects_dangerous_components_on_linux_too() {
+    let invalid = [
+        r"C:\Users\me\bad<name",
+        r"C:\Users\me\bad>name",
+        r"C:\Users\me\bad:name",
+        r#"C:\Users\me\bad"name"#,
+        r"C:\Users\me\bad|name",
+        r"C:\Users\me\bad?name",
+        r"C:\Users\me\bad*name",
+        "C:\\Users\\me\\bad\nname",
+        r"C:\Users\me\capture.",
+        r"C:\Users\me\capture. ",
+        r"C:\Users\me\CON",
+        r"C:\Users\me\prn.txt",
+        r"C:\Users\me\Aux",
+        r"C:\Users\me\nul.png",
+        r"C:\Users\me\COM1.log",
+        r"C:\Users\me\lpt9",
+        r"C:\Users\me\..\escape",
+        r"C:relative\capture",
+        r"\\?\C:\Users\me\capture",
+        r"\\?\UNC\server\share\capture",
+        r"\\.\PhysicalDrive0",
+        r"\??\C:\Users\me\capture",
+        r"\Device\HarddiskVolume1\capture",
+    ];
+    for path in invalid {
+        assert!(
+            validate_custom_save_directory_for_platform(path, SavePathPlatform::Windows).is_err(),
+            "Windows path {path:?} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn windows_custom_path_validation_accepts_drive_and_unc_absolute_paths() {
+    for path in [
+        r"C:\",
+        r"C:\Users\me\NewPic captures",
+        r"C:\Users\me\NewPic captures\",
+        r"D:/Pictures/NewPic",
+        r"\\server\share\Pictures\NewPic",
+        r"\\server\share\",
+    ] {
+        assert_eq!(
+            validate_custom_save_directory_for_platform(path, SavePathPlatform::Windows),
+            Ok(()),
+            "Windows path {path:?} must be accepted"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn native_unix_validation_does_not_apply_windows_component_rules() {
+    assert_eq!(
+        validate_custom_save_directory_for_platform(
+            "/tmp/NewPic:CON?native",
+            SavePathPlatform::Native,
+        ),
+        Ok(())
+    );
 }
 
 #[test]

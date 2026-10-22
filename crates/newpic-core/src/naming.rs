@@ -1,5 +1,3 @@
-use std::fs::{self, File, OpenOptions};
-use std::io;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -111,92 +109,21 @@ impl NameAllocator {
         Ok(filename)
     }
 
-    pub fn reserve(&self, directory: impl AsRef<Path>) -> Result<NameReservation, NamingError> {
-        let directory = directory.as_ref();
-        let mut sequence = 1_u64;
-        loop {
-            let filename = self.render_filename(sequence)?;
-            let target_path = directory.join(&filename);
-            if target_path.try_exists().map_err(|source| NamingError::Io {
-                path: target_path.clone(),
-                source,
-            })? {
-                if !self.has_sequence {
-                    return Err(NamingError::NameUnavailable);
-                }
-                sequence = sequence
-                    .checked_add(1)
-                    .ok_or(NamingError::SequenceExhausted)?;
-                continue;
-            }
+    pub fn path_for(
+        &self,
+        directory: impl AsRef<Path>,
+        sequence: u64,
+    ) -> Result<PathBuf, NamingError> {
+        Ok(directory.as_ref().join(self.render_filename(sequence)?))
+    }
 
-            let claim_path = directory.join(format!(".newpic-{filename}.reserve"));
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&claim_path)
-            {
-                Ok(claim) => {
-                    if target_path.try_exists().map_err(|source| NamingError::Io {
-                        path: target_path.clone(),
-                        source,
-                    })? {
-                        drop(claim);
-                        let _ = fs::remove_file(&claim_path);
-                        if !self.has_sequence {
-                            return Err(NamingError::NameUnavailable);
-                        }
-                        sequence = sequence
-                            .checked_add(1)
-                            .ok_or(NamingError::SequenceExhausted)?;
-                        continue;
-                    }
-                    return Ok(NameReservation {
-                        target_path,
-                        claim_path,
-                        _claim: claim,
-                    });
-                }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    if !self.has_sequence {
-                        return Err(NamingError::NameUnavailable);
-                    }
-                    sequence = sequence
-                        .checked_add(1)
-                        .ok_or(NamingError::SequenceExhausted)?;
-                }
-                Err(source) => {
-                    return Err(NamingError::Io {
-                        path: claim_path,
-                        source,
-                    });
-                }
-            }
-        }
+    pub fn has_sequence(&self) -> bool {
+        self.has_sequence
     }
 }
 
 pub fn render_sequence(sequence: u64, minimum_width: usize) -> String {
     format!("{sequence:0minimum_width$}")
-}
-
-#[derive(Debug)]
-pub struct NameReservation {
-    target_path: PathBuf,
-    claim_path: PathBuf,
-    _claim: File,
-}
-
-impl NameReservation {
-    pub fn path(&self) -> &Path {
-        &self.target_path
-    }
-}
-
-impl Drop for NameReservation {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.claim_path);
-    }
 }
 
 #[derive(Debug, Error)]
@@ -209,16 +136,8 @@ pub enum NamingError {
     UnsupportedToken(String),
     #[error("filename {0:?} is not portable")]
     InvalidFilename(String),
-    #[error("the fixed filename is already reserved or exists")]
-    NameUnavailable,
     #[error("the filename sequence is exhausted")]
     SequenceExhausted,
-    #[error("filename reservation failed for {path}: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
 }
 
 fn validate_tokens(pattern: &str) -> Result<bool, NamingError> {
@@ -250,7 +169,7 @@ fn validate_portable_filename(filename: &str) -> Result<(), NamingError> {
     let invalid_shape = filename == "."
         || filename == ".."
         || filename.ends_with(['.', ' '])
-        || filename.len() > 255;
+        || filename.len() > MAX_PORTABLE_FILENAME_BYTES;
     let stem = filename
         .split('.')
         .next()
@@ -266,6 +185,11 @@ fn validate_portable_filename(filename: &str) -> Result<(), NamingError> {
     }
     Ok(())
 }
+
+/// Portable target-component limit. Storage temporary names are generated
+/// independently and never prepend text to this target filename.
+pub const MAX_PORTABLE_FILENAME_BYTES: usize = 255;
+
 fn reserved_numbered_name(stem: &str, prefix: &str) -> bool {
     stem.strip_prefix(prefix)
         .and_then(|suffix| suffix.parse::<u8>().ok())

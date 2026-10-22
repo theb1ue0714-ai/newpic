@@ -224,8 +224,36 @@ pub enum SettingsValidationError {
 }
 
 fn validate_custom_save_directory(path: &Path) -> Result<(), SettingsValidationError> {
+    let text = path
+        .to_str()
+        .ok_or_else(|| SettingsValidationError::UnsafeCustomSaveDirectory(path.to_path_buf()))?;
+    #[cfg(windows)]
+    let platform = SavePathPlatform::Windows;
+    #[cfg(not(windows))]
+    let platform = SavePathPlatform::Native;
+    validate_custom_save_directory_for_platform(text, platform)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SavePathPlatform {
+    Native,
+    Windows,
+}
+
+pub fn validate_custom_save_directory_for_platform(
+    path: &str,
+    platform: SavePathPlatform,
+) -> Result<(), SettingsValidationError> {
+    match platform {
+        SavePathPlatform::Native => validate_native_save_directory(path),
+        SavePathPlatform::Windows => validate_windows_save_directory(path),
+    }
+}
+
+fn validate_native_save_directory(path: &str) -> Result<(), SettingsValidationError> {
     use std::path::Component;
 
+    let path = Path::new(path);
     if path.as_os_str().is_empty() {
         return Err(SettingsValidationError::EmptyCustomSaveDirectory);
     }
@@ -234,10 +262,11 @@ fn validate_custom_save_directory(path: &Path) -> Result<(), SettingsValidationE
             path.to_path_buf(),
         ));
     }
-    let text = path
-        .to_str()
-        .ok_or_else(|| SettingsValidationError::UnsafeCustomSaveDirectory(path.to_path_buf()))?;
-    if text.chars().any(char::is_control)
+    if path
+        .as_os_str()
+        .to_string_lossy()
+        .chars()
+        .any(char::is_control)
         || path
             .components()
             .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
@@ -247,6 +276,84 @@ fn validate_custom_save_directory(path: &Path) -> Result<(), SettingsValidationE
         ));
     }
     Ok(())
+}
+
+fn validate_windows_save_directory(path: &str) -> Result<(), SettingsValidationError> {
+    let rejected = || SettingsValidationError::UnsafeCustomSaveDirectory(PathBuf::from(path));
+    if path.is_empty() {
+        return Err(SettingsValidationError::EmptyCustomSaveDirectory);
+    }
+    let normalized = path.replace('/', "\\");
+    let uppercase = normalized.to_ascii_uppercase();
+    if uppercase.starts_with(r"\\?\")
+        || uppercase.starts_with(r"\\.\")
+        || uppercase.starts_with(r"\??\")
+    {
+        return Err(rejected());
+    }
+
+    let components: Vec<&str> = if let Some(unc_path) = normalized.strip_prefix(r"\\") {
+        let raw_components: Vec<_> = unc_path.split('\\').collect();
+        if raw_components.len() < 2 || raw_components[0].is_empty() || raw_components[1].is_empty()
+        {
+            return Err(SettingsValidationError::CustomSaveDirectoryMustBeAbsolute(
+                PathBuf::from(path),
+            ));
+        }
+        raw_components
+            .into_iter()
+            .filter(|component| !component.is_empty())
+            .collect()
+    } else {
+        let bytes = normalized.as_bytes();
+        if bytes.len() < 3
+            || !bytes[0].is_ascii_alphabetic()
+            || bytes[1] != b':'
+            || bytes[2] != b'\\'
+        {
+            return Err(SettingsValidationError::CustomSaveDirectoryMustBeAbsolute(
+                PathBuf::from(path),
+            ));
+        }
+        normalized[3..]
+            .split('\\')
+            .filter(|component| !component.is_empty())
+            .collect()
+    };
+
+    for component in components {
+        if component.is_empty() || matches!(component, "." | "..") {
+            return Err(rejected());
+        }
+        if component.ends_with(['.', ' '])
+            || component.chars().any(|character| {
+                character.is_control()
+                    || matches!(character, '<' | '>' | ':' | '"' | '|' | '?' | '*')
+            })
+            || is_windows_reserved_component(component)
+        {
+            return Err(rejected());
+        }
+    }
+    Ok(())
+}
+
+fn is_windows_reserved_component(component: &str) -> bool {
+    let stem = component
+        .split('.')
+        .next()
+        .unwrap_or(component)
+        .trim_end_matches(['.', ' '])
+        .to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || windows_numbered_device(&stem, "COM")
+        || windows_numbered_device(&stem, "LPT")
+}
+
+fn windows_numbered_device(stem: &str, prefix: &str) -> bool {
+    stem.strip_prefix(prefix)
+        .and_then(|suffix| suffix.parse::<u8>().ok())
+        .is_some_and(|number| (1..=9).contains(&number))
 }
 
 fn validate_naming_pattern(pattern: &str) -> Result<(), SettingsValidationError> {
