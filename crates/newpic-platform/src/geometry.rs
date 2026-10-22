@@ -39,8 +39,8 @@ impl LogicalPoint {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalSize {
-    pub width: u32,
-    pub height: u32,
+    width: u32,
+    height: u32,
 }
 
 impl PhysicalSize {
@@ -49,6 +49,18 @@ impl PhysicalSize {
             return Err(GeometryError::ZeroSize { width, height });
         }
         Ok(Self { width, height })
+    }
+
+    pub const fn width(self) -> u32 {
+        self.width
+    }
+
+    pub const fn height(self) -> u32 {
+        self.height
+    }
+
+    fn revalidate(self) -> Result<Self, GeometryError> {
+        Self::new(self.width, self.height)
     }
 }
 
@@ -63,11 +75,9 @@ impl PhysicalRect {
         Self::from_origin_size(x, y, PhysicalSize::new(width, height)?)
     }
 
-    pub const fn from_origin_size(
-        x: i32,
-        y: i32,
-        size: PhysicalSize,
-    ) -> Result<Self, GeometryError> {
+    pub fn from_origin_size(x: i32, y: i32, size: PhysicalSize) -> Result<Self, GeometryError> {
+        let size = size.revalidate()?;
+        validate_extent(x, y, size)?;
         Ok(Self {
             origin: PhysicalPoint::new(x, y),
             size,
@@ -121,6 +131,21 @@ impl PhysicalRect {
     }
 }
 
+fn validate_extent(x: i32, y: i32, size: PhysicalSize) -> Result<(), GeometryError> {
+    let maximum_exclusive = i64::from(i32::MAX) + 1;
+    let right = i64::from(x) + i64::from(size.width());
+    let bottom = i64::from(y) + i64::from(size.height());
+    if right > maximum_exclusive || bottom > maximum_exclusive {
+        return Err(GeometryError::CoordinateExtentOverflow {
+            x,
+            y,
+            width: size.width(),
+            height: size.height(),
+        });
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScaleFactor(f64);
 
@@ -143,6 +168,15 @@ pub struct Display {
     bounds: PhysicalRect,
     scale_factor: ScaleFactor,
     primary: bool,
+    orientation: DisplayOrientation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayOrientation {
+    Landscape,
+    Portrait,
+    LandscapeFlipped,
+    PortraitFlipped,
 }
 
 impl Display {
@@ -151,12 +185,14 @@ impl Display {
         bounds: PhysicalRect,
         scale_factor: ScaleFactor,
         primary: bool,
+        orientation: DisplayOrientation,
     ) -> Self {
         Self {
             id,
             bounds,
             scale_factor,
             primary,
+            orientation,
         }
     }
 
@@ -174,6 +210,10 @@ impl Display {
 
     pub const fn is_primary(&self) -> bool {
         self.primary
+    }
+
+    pub const fn orientation(&self) -> DisplayOrientation {
+        self.orientation
     }
 
     /// Converts a display-local logical point into virtual-desktop physical pixels.
@@ -194,6 +234,140 @@ impl Display {
         }
         Ok(PhysicalPoint::new(rounded_x as i32, rounded_y as i32))
     }
+}
+
+/// Capture-time topology for a display that contributed pixels to an F7 region.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SavedDisplayTopology {
+    id: DisplayId,
+    bounds: PhysicalRect,
+    scale_factor: ScaleFactor,
+    orientation: DisplayOrientation,
+}
+
+impl SavedDisplayTopology {
+    pub const fn id(&self) -> &DisplayId {
+        &self.id
+    }
+
+    pub const fn bounds(&self) -> PhysicalRect {
+        self.bounds
+    }
+
+    pub const fn scale_factor(&self) -> ScaleFactor {
+        self.scale_factor
+    }
+
+    pub const fn orientation(&self) -> DisplayOrientation {
+        self.orientation
+    }
+}
+
+/// A completed F7 region together with enough display topology to safely
+/// decide whether F8 may reuse or translate it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SavedRegion {
+    rect: PhysicalRect,
+    participating_displays: Vec<SavedDisplayTopology>,
+}
+
+impl SavedRegion {
+    pub fn capture(rect: PhysicalRect, displays: &[Display]) -> Result<Self, GeometryError> {
+        let participating_displays: Vec<_> = displays
+            .iter()
+            .filter(|display| rect.intersection(display.bounds()).is_some())
+            .map(|display| SavedDisplayTopology {
+                id: display.id().clone(),
+                bounds: display.bounds(),
+                scale_factor: display.scale_factor(),
+                orientation: display.orientation(),
+            })
+            .collect();
+        if participating_displays.is_empty() {
+            return Err(GeometryError::RegionOutsideDisplays);
+        }
+        Ok(Self {
+            rect,
+            participating_displays,
+        })
+    }
+
+    pub const fn rect(&self) -> PhysicalRect {
+        self.rect
+    }
+
+    pub fn participating_displays(&self) -> &[SavedDisplayTopology] {
+        &self.participating_displays
+    }
+
+    /// Reuses unchanged topology, or translates by a common physical-origin
+    /// delta. Any semantic topology change deterministically requests F7.
+    pub fn revalidate(&self, current: &[Display]) -> SavedRegionDecision {
+        let mut translation: Option<(i64, i64)> = None;
+        for saved in &self.participating_displays {
+            let Some(display) = current.iter().find(|display| display.id() == saved.id()) else {
+                return SavedRegionDecision::FallbackToSelection(
+                    SavedRegionInvalidation::DisplayRemoved(saved.id.clone()),
+                );
+            };
+            if display.orientation() != saved.orientation {
+                return SavedRegionDecision::FallbackToSelection(
+                    SavedRegionInvalidation::OrientationChanged(saved.id.clone()),
+                );
+            }
+            if display.bounds().size() != saved.bounds.size() {
+                return SavedRegionDecision::FallbackToSelection(
+                    SavedRegionInvalidation::ResolutionChanged(saved.id.clone()),
+                );
+            }
+            if display.scale_factor() != saved.scale_factor {
+                return SavedRegionDecision::FallbackToSelection(
+                    SavedRegionInvalidation::ScaleChanged(saved.id.clone()),
+                );
+            }
+            let delta = (
+                display.bounds().left() - saved.bounds.left(),
+                display.bounds().top() - saved.bounds.top(),
+            );
+            if translation.is_some_and(|expected| expected != delta) {
+                return SavedRegionDecision::FallbackToSelection(
+                    SavedRegionInvalidation::InconsistentDisplayMovement,
+                );
+            }
+            translation = Some(delta);
+        }
+
+        let (delta_x, delta_y) = translation.unwrap_or((0, 0));
+        let x = i64::from(self.rect.origin().x) + delta_x;
+        let y = i64::from(self.rect.origin().y) + delta_y;
+        let (Ok(x), Ok(y)) = (i32::try_from(x), i32::try_from(y)) else {
+            return SavedRegionDecision::FallbackToSelection(
+                SavedRegionInvalidation::TranslatedRegionOutOfRange,
+            );
+        };
+        match PhysicalRect::from_origin_size(x, y, self.rect.size()) {
+            Ok(rect) => SavedRegionDecision::Reuse(rect),
+            Err(_) => SavedRegionDecision::FallbackToSelection(
+                SavedRegionInvalidation::TranslatedRegionOutOfRange,
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SavedRegionDecision {
+    Reuse(PhysicalRect),
+    FallbackToSelection(SavedRegionInvalidation),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SavedRegionInvalidation {
+    DisplayRemoved(DisplayId),
+    ResolutionChanged(DisplayId),
+    ScaleChanged(DisplayId),
+    OrientationChanged(DisplayId),
+    InconsistentDisplayMovement,
+    TranslatedRegionOutOfRange,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,13 +405,6 @@ pub fn intersections_with_displays(
         .collect()
 }
 
-/// F8 regions are valid only while at least one attached display covers a pixel.
-pub fn is_region_valid(region: PhysicalRect, displays: &[Display]) -> bool {
-    displays
-        .iter()
-        .any(|display| region.intersection(display.bounds).is_some())
-}
-
 /// Builds an F9 rectangle centered at `pointer`, reduced and repositioned so
 /// it is wholly contained by the selected display.
 pub fn fixed_region_at(
@@ -246,8 +413,8 @@ pub fn fixed_region_at(
     display: &Display,
 ) -> Result<PhysicalRect, GeometryError> {
     let bounds = display.bounds;
-    let width = requested.width.min(bounds.size.width);
-    let height = requested.height.min(bounds.size.height);
+    let width = requested.width().min(bounds.size.width());
+    let height = requested.height().min(bounds.size.height());
     let centered_x = i64::from(pointer.x) - i64::from(width) / 2;
     let centered_y = i64::from(pointer.y) - i64::from(height) / 2;
     let max_x = bounds.right() - i64::from(width);
@@ -267,10 +434,21 @@ pub fn fixed_region_at(
 pub enum GeometryError {
     #[error("physical size must be non-zero, got {width} by {height}")]
     ZeroSize { width: u32, height: u32 },
+    #[error(
+        "physical rectangle extent exceeds the coordinate range: ({x}, {y}) {width} by {height}"
+    )]
+    CoordinateExtentOverflow {
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    },
     #[error("scale factor must be finite and greater than zero, got {0}")]
     InvalidScaleFactor(f64),
     #[error("logical point coordinates must be finite")]
     NonFiniteLogicalPoint,
     #[error("coordinate is outside the supported physical range")]
     CoordinateOutOfRange,
+    #[error("saved region does not intersect an attached display")]
+    RegionOutsideDisplays,
 }

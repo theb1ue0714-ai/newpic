@@ -10,10 +10,48 @@ pub trait CaptureProvider: Send + Sync {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CaptureRequest {
+pub enum CaptureSource {
     Region(PhysicalRect),
     ActiveWindow,
     Display(DisplayId),
+}
+
+/// Options are part of every request so providers never depend on hidden
+/// mutable capture settings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CaptureOptions {
+    include_pointer: bool,
+}
+
+impl CaptureOptions {
+    pub const fn with_include_pointer(mut self, include_pointer: bool) -> Self {
+        self.include_pointer = include_pointer;
+        self
+    }
+
+    pub const fn include_pointer(self) -> bool {
+        self.include_pointer
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureRequest {
+    source: CaptureSource,
+    options: CaptureOptions,
+}
+
+impl CaptureRequest {
+    pub const fn new(source: CaptureSource, options: CaptureOptions) -> Self {
+        Self { source, options }
+    }
+
+    pub const fn source(&self) -> &CaptureSource {
+        &self.source
+    }
+
+    pub const fn options(&self) -> CaptureOptions {
+        self.options
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

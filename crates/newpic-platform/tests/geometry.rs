@@ -1,10 +1,13 @@
-use newpic_platform::capabilities::{CaptureBackend, CaptureCapabilities};
+use newpic_platform::capabilities::{
+    CapabilityStatus, CaptureBackend, CaptureCapabilities, CaptureOperation,
+};
 use newpic_platform::capture::{
     CaptureError, CaptureFallback, CaptureProvenance, CapturedImage, PixelScale,
 };
 use newpic_platform::geometry::{
-    fixed_region_at, intersections_with_displays, is_region_valid, Display, DisplayId,
-    LogicalPoint, PhysicalPoint, PhysicalRect, PhysicalSize, ScaleFactor,
+    fixed_region_at, intersections_with_displays, Display, DisplayId, DisplayOrientation,
+    LogicalPoint, PhysicalPoint, PhysicalRect, PhysicalSize, SavedRegion, SavedRegionDecision,
+    SavedRegionInvalidation, ScaleFactor,
 };
 
 fn display(id: &str, x: i32, y: i32, width: u32, height: u32, scale: f64) -> Display {
@@ -13,6 +16,11 @@ fn display(id: &str, x: i32, y: i32, width: u32, height: u32, scale: f64) -> Dis
         PhysicalRect::new(x, y, width, height).expect("valid display bounds"),
         ScaleFactor::new(scale).expect("valid scale factor"),
         false,
+        if width >= height {
+            DisplayOrientation::Landscape
+        } else {
+            DisplayOrientation::Portrait
+        },
     )
 }
 
@@ -71,16 +79,6 @@ fn fixed_region_position_is_clamped_inside_the_selected_display() {
         near_bottom_right,
         PhysicalRect::new(1220, 180, 800, 600).unwrap()
     );
-}
-
-#[test]
-fn last_region_becomes_invalid_after_its_display_is_removed() {
-    let left = display("left", -1920, 0, 1920, 1080, 1.0);
-    let right = display("right", 0, 0, 2560, 1440, 1.25);
-    let saved = PhysicalRect::new(-800, 100, 500, 400).unwrap();
-
-    assert!(is_region_valid(saved, &[left.clone(), right.clone()]));
-    assert!(!is_region_valid(saved, &[right]));
 }
 
 #[test]
@@ -164,18 +162,37 @@ fn captured_image_rejects_invalid_rgba_layouts_with_typed_errors() {
 #[test]
 fn capabilities_explicitly_describe_backend_and_supported_operations() {
     let capabilities = CaptureCapabilities::new(CaptureBackend::XdgDesktopPortal)
-        .with_region_capture(true)
-        .with_active_window_capture(false)
-        .with_display_capture(true)
-        .with_unattended_capture(false)
-        .with_pointer_capture(false);
+        .with_region_capture(CapabilityStatus::supported())
+        .with_active_window_capture(CapabilityStatus::unsupported(
+            "the portal cannot select an active window",
+            Some("use region capture instead"),
+        ))
+        .with_display_capture(CapabilityStatus::supported())
+        .with_unattended_capture(CapabilityStatus::limited(
+            "the compositor shows a chooser",
+            None::<String>,
+        ))
+        .with_pointer_capture(CapabilityStatus::unsupported(
+            "pointer inclusion is compositor-controlled",
+            None::<String>,
+        ));
 
     assert_eq!(capabilities.backend(), CaptureBackend::XdgDesktopPortal);
-    assert!(capabilities.region_capture());
-    assert!(!capabilities.active_window_capture());
-    assert!(capabilities.display_capture());
-    assert!(!capabilities.unattended_capture());
-    assert!(!capabilities.pointer_capture());
+    assert!(capabilities.region_capture().is_available());
+    assert!(capabilities.display_capture().is_available());
+    assert!(capabilities.unattended_capture().is_available());
+    assert_eq!(
+        capabilities.status(CaptureOperation::ActiveWindow),
+        &CapabilityStatus::unsupported(
+            "the portal cannot select an active window",
+            Some("use region capture instead"),
+        )
+    );
+    assert_eq!(
+        capabilities.pointer_capture().reason(),
+        Some("pointer inclusion is compositor-controlled")
+    );
+    assert!(!capabilities.pointer_capture().is_available());
 }
 
 #[test]
@@ -185,4 +202,153 @@ fn malformed_geometry_and_scale_values_return_typed_errors() {
     assert!(ScaleFactor::new(0.0).is_err());
     assert!(ScaleFactor::new(f64::NAN).is_err());
     assert!(PixelScale::new(f64::INFINITY, 1.0).is_err());
+}
+
+#[test]
+fn physical_size_accessors_preserve_non_zero_invariants() {
+    let size = PhysicalSize::new(800, 600).unwrap();
+
+    assert_eq!(size.width(), 800);
+    assert_eq!(size.height(), 600);
+    assert_eq!(
+        PhysicalSize::new(0, 600),
+        Err(newpic_platform::geometry::GeometryError::ZeroSize {
+            width: 0,
+            height: 600
+        })
+    );
+    assert_eq!(
+        PhysicalSize::new(800, 0),
+        Err(newpic_platform::geometry::GeometryError::ZeroSize {
+            width: 800,
+            height: 0
+        })
+    );
+}
+
+#[test]
+fn physical_rect_rejects_coordinate_extent_overflow() {
+    assert!(matches!(
+        PhysicalRect::new(i32::MAX, 0, 2, 1),
+        Err(newpic_platform::geometry::GeometryError::CoordinateExtentOverflow { .. })
+    ));
+    assert!(matches!(
+        PhysicalRect::new(0, i32::MAX, 1, 2),
+        Err(newpic_platform::geometry::GeometryError::CoordinateExtentOverflow { .. })
+    ));
+}
+
+#[test]
+fn saved_region_reuses_unchanged_topology() {
+    let left = display("left", -1280, 0, 1280, 1024, 1.0);
+    let right = display("right", 0, 0, 1920, 1080, 1.5);
+    let rect = PhysicalRect::new(-100, 50, 300, 200).unwrap();
+    let saved = SavedRegion::capture(rect, &[left.clone(), right.clone()]).unwrap();
+
+    assert_eq!(
+        saved.revalidate(&[left, right]),
+        SavedRegionDecision::Reuse(rect)
+    );
+    assert_eq!(saved.participating_displays().len(), 2);
+}
+
+#[test]
+fn saved_region_translates_when_all_participating_displays_move_together() {
+    let original = display("external", -1920, 0, 1920, 1080, 1.0);
+    let saved = SavedRegion::capture(
+        PhysicalRect::new(-800, 100, 500, 400).unwrap(),
+        std::slice::from_ref(&original),
+    )
+    .unwrap();
+    let moved = display("external", -1600, 200, 1920, 1080, 1.0);
+
+    assert_eq!(
+        saved.revalidate(&[moved]),
+        SavedRegionDecision::Reuse(PhysicalRect::new(-480, 300, 500, 400).unwrap())
+    );
+}
+
+#[test]
+fn saved_region_falls_back_after_removal_scale_resolution_or_orientation_change() {
+    let original = Display::new(
+        DisplayId::new("external"),
+        PhysicalRect::new(-1920, 0, 1920, 1080).unwrap(),
+        ScaleFactor::new(1.0).unwrap(),
+        false,
+        DisplayOrientation::Landscape,
+    );
+    let saved = SavedRegion::capture(
+        PhysicalRect::new(-800, 100, 500, 400).unwrap(),
+        std::slice::from_ref(&original),
+    )
+    .unwrap();
+
+    assert_eq!(
+        saved.revalidate(&[]),
+        SavedRegionDecision::FallbackToSelection(SavedRegionInvalidation::DisplayRemoved(
+            DisplayId::new("external")
+        ))
+    );
+
+    let scaled = Display::new(
+        original.id().clone(),
+        original.bounds(),
+        ScaleFactor::new(1.25).unwrap(),
+        false,
+        DisplayOrientation::Landscape,
+    );
+    assert_eq!(
+        saved.revalidate(&[scaled]),
+        SavedRegionDecision::FallbackToSelection(SavedRegionInvalidation::ScaleChanged(
+            DisplayId::new("external")
+        ))
+    );
+
+    let resized = Display::new(
+        original.id().clone(),
+        PhysicalRect::new(-1920, 0, 1600, 900).unwrap(),
+        ScaleFactor::new(1.0).unwrap(),
+        false,
+        DisplayOrientation::Landscape,
+    );
+    assert_eq!(
+        saved.revalidate(&[resized]),
+        SavedRegionDecision::FallbackToSelection(SavedRegionInvalidation::ResolutionChanged(
+            DisplayId::new("external")
+        ))
+    );
+
+    let rotated = Display::new(
+        original.id().clone(),
+        original.bounds(),
+        ScaleFactor::new(1.0).unwrap(),
+        false,
+        DisplayOrientation::LandscapeFlipped,
+    );
+    assert_eq!(
+        saved.revalidate(&[rotated]),
+        SavedRegionDecision::FallbackToSelection(SavedRegionInvalidation::OrientationChanged(
+            DisplayId::new("external")
+        ))
+    );
+}
+
+#[test]
+fn saved_region_rejects_inconsistent_multi_display_movement() {
+    let left = display("left", -1280, 0, 1280, 1024, 1.0);
+    let right = display("right", 0, 0, 1920, 1080, 1.0);
+    let saved = SavedRegion::capture(
+        PhysicalRect::new(-100, 50, 300, 200).unwrap(),
+        &[left, right],
+    )
+    .unwrap();
+    let moved_left = display("left", -1400, 0, 1280, 1024, 1.0);
+    let unchanged_right = display("right", 0, 0, 1920, 1080, 1.0);
+
+    assert_eq!(
+        saved.revalidate(&[moved_left, unchanged_right]),
+        SavedRegionDecision::FallbackToSelection(
+            SavedRegionInvalidation::InconsistentDisplayMovement
+        )
+    );
 }
