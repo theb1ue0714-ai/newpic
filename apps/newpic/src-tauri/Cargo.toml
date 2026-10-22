@@ -1,0 +1,16 @@
+[package]
+name = "newpic-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "newpic_desktop_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+tauri.workspace = true
+newpic-core = { path = "../../../crates/newpic-core" }

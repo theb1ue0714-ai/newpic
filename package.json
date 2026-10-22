@@ -1,0 +1,14 @@
+{
+  "name": "newpic-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/newpic"
+  ],
+  "scripts": {
+    "dev": "npm --workspace @newpic/desktop run tauri dev",
+    "build": "npm --workspace @newpic/desktop run tauri build",
+    "test": "npm --workspace @newpic/desktop test",
+    "typecheck": "npm --workspace @newpic/desktop run typecheck"
+  }
+}

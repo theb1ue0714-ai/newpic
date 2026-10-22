@@ -1,0 +1,9 @@
+[package]
+name = "newpic-testing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+newpic-core = { path = "../newpic-core" }
+newpic-platform = { path = "../newpic-platform" }

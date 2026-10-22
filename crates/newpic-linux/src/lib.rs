@@ -1,0 +1,1 @@
+//! Linux integration for NewPic.

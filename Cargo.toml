@@ -1,0 +1,31 @@
+[workspace]
+members = [
+  "apps/newpic/src-tauri",
+  "crates/newpic-core",
+  "crates/newpic-platform",
+  "crates/newpic-windows",
+  "crates/newpic-macos",
+  "crates/newpic-linux",
+  "crates/newpic-testing",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+arboard = "=3.7.0"
+directories = "=6.0.0"
+image = "=0.25.10"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+tauri = "=2.12.5"
+tauri-build = "=2.7.4"
+tauri-plugin-autostart = "=2.7.0"
+tauri-plugin-global-shortcut = "=2.4.1"
+tauri-plugin-notification = "=2.7.0"
+tempfile = "=3.27.0"
+thiserror = "=2.0.21"
+xcap = "=0.9.8"

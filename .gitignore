@@ -16,6 +16,7 @@ yarn-error.log*
 # Rust and Tauri output
 target/
 **/target/
+**/src-tauri/gen/
 *.msi
 *.msix
 *.exe
