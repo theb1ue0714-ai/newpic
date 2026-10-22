@@ -5,13 +5,19 @@ use std::thread;
 
 use newpic_core::settings::{SaveDirectory, Settings, SettingsRepository};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, Runtime, State};
+use tauri::{AppHandle, Manager, Runtime, State};
 use tauri_plugin_notification::NotificationExt;
 
-use crate::app_state::{delivery_notice, lock, plan_capture, AppState, CapturePlan, Notice};
+use crate::app_state::{
+    delivery_notice, lock, plan_capture, AppState, CapturePlan, Notice, SelectionMode,
+    SelectionRequest,
+};
 use crate::autostart::{self, AutostartStatus};
 use crate::diagnostics::{Diagnostics, EventLevel};
 use crate::hotkeys::{self, CaptureAction, RegistrationEntry};
+use crate::overlay::{self, OverlayError, OverlayInfo, PhysicalRectDto};
+use newpic_platform::capture::CaptureSource;
+use newpic_platform::geometry::PhysicalRect;
 
 pub const SELECTION_REQUESTED_EVENT: &str = "newpic://selection-requested";
 
@@ -89,6 +95,81 @@ pub fn choose_save_folder<R: Runtime>(
 #[tauri::command]
 pub fn trigger_capture<R: Runtime>(app: AppHandle<R>, action: CaptureAction) {
     run_action(&app, action);
+}
+
+#[tauri::command]
+pub fn get_overlay_info(state: State<'_, AppState>) -> Result<OverlayInfo, CommandError> {
+    let coordinator = lock(&state.overlay);
+    let request = coordinator
+        .active_request()
+        .cloned()
+        .ok_or_else(|| CommandError::new("no active selection request"))?;
+    let displays = state
+        .displays()
+        .map_err(|e| CommandError::new(format!("could not query displays: {e}")))?;
+    let primary = displays
+        .iter()
+        .find(|d| d.is_primary())
+        .or_else(|| displays.first())
+        .ok_or_else(|| CommandError::new("no displays found"))?;
+    Ok(OverlayInfo {
+        request,
+        display_bounds: primary.bounds().into(),
+        scale_factor: primary.scale_factor().get(),
+    })
+}
+
+#[tauri::command]
+pub fn complete_selection<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+    rect: PhysicalRectDto,
+) -> Result<(), CommandError> {
+    let physical_rect = PhysicalRect::try_from(rect).map_err(CommandError::new)?;
+    lock(&state.overlay)
+        .complete(physical_rect)
+        .map_err(CommandError::new)?;
+    overlay::close_overlays(&app);
+
+    let app = app.clone();
+    thread::spawn(move || {
+        let state = app.state::<AppState>();
+        let Some(_guard) = state.try_begin_capture() else {
+            state.record(
+                EventLevel::Warning,
+                "capture ignored: another capture is running",
+            );
+            return;
+        };
+        let notice = match state.capture(CaptureSource::Region(physical_rect)) {
+            Ok(image) => {
+                let result = state.deliver(&image);
+                delivery_notice(&result, state.settings().success_notifications)
+            }
+            Err(reason) => Some(Notice {
+                title: "영역 캡처 실패".to_owned(),
+                body: reason,
+                level: EventLevel::Error,
+            }),
+        };
+        if let Some(notice) = notice {
+            state.record(notice.level, notice.title.clone());
+            notify(&app, &notice);
+        }
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn cancel_selection<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+) -> Result<(), CommandError> {
+    overlay::close_overlays(&app);
+    lock(&state.overlay).cancel();
+    state.record(EventLevel::Info, "selection cancelled");
+    Ok(())
 }
 
 #[tauri::command]
@@ -196,14 +277,43 @@ pub fn reconcile_autostart<R: Runtime>(app: &AppHandle<R>, state: &AppState, des
 /// Starts a capture action from a shortcut, the tray, or the settings window.
 pub fn run_action<R: Runtime>(app: &AppHandle<R>, action: CaptureAction) {
     let state = app.state::<AppState>();
-    match plan_capture(action, &state.settings()) {
-        CapturePlan::Select(request) => {
-            if let Err(error) = app.emit(SELECTION_REQUESTED_EVENT, &request) {
-                state.record(
-                    EventLevel::Error,
-                    format!("could not open selection for {}: {error}", action.id()),
-                );
+    let plan = match action {
+        CaptureAction::RepeatRegion => {
+            let displays = state.displays().unwrap_or_default();
+            if let Some(region) = lock(&state.overlay).validate_repeat_region(&displays) {
+                CapturePlan::Direct(CaptureSource::Region(region))
+            } else {
+                CapturePlan::Select(SelectionRequest {
+                    action: CaptureAction::Region,
+                    mode: SelectionMode::FreeRegion,
+                    fixed_size: None,
+                    fallback_from: Some(CaptureAction::RepeatRegion),
+                })
             }
+        }
+        other => plan_capture(other, &state.settings()),
+    };
+
+    match plan {
+        CapturePlan::Select(request) => {
+            let mut overlay = lock(&state.overlay);
+            if let Err(OverlayError::AlreadyActive) = overlay.start_selection(request.clone()) {
+                state.record(
+                    EventLevel::Warning,
+                    "capture ignored: another capture or selection is running",
+                );
+                notify(
+                    app,
+                    &Notice {
+                        title: "캡처 진행 중".to_owned(),
+                        body: "이미 캡처 또는 영역 선택이 진행 중입니다.".to_owned(),
+                        level: EventLevel::Warning,
+                    },
+                );
+                return;
+            }
+            drop(overlay);
+            overlay::open_overlays(app, &request);
         }
         CapturePlan::Direct(source) => {
             let app = app.clone();

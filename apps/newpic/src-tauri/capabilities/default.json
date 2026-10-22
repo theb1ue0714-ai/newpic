@@ -2,6 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Settings window: NewPic's own typed commands plus event listening for selection and status updates. Shortcuts, autostart, notifications, filesystem, and shell access stay in the Rust backend and are not exposed to the webview.",
-  "windows": ["main"],
+  "windows": ["main", "overlay*"],
   "permissions": ["core:event:default"]
 }

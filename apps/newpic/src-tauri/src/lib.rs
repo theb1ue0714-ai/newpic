@@ -3,6 +3,7 @@ pub mod autostart;
 pub mod commands;
 pub mod diagnostics;
 pub mod hotkeys;
+pub mod overlay;
 pub mod tray;
 
 use newpic_core::settings::{
@@ -43,6 +44,9 @@ pub fn run() {
             commands::trigger_capture,
             commands::get_diagnostics,
             commands::open_permission_settings,
+            commands::get_overlay_info,
+            commands::complete_selection,
+            commands::cancel_selection,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NewPic");

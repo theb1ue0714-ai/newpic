@@ -19,13 +19,15 @@ use newpic_platform::capture::{
     CaptureOptions, CaptureProvider, CaptureRequest, CaptureSource, CapturedImage,
 };
 use newpic_platform::clipboard::ImageClipboard;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::autostart::AutostartStatus;
 use crate::diagnostics::{
     probe_destination, CaptureDiagnostics, DiagnosticLog, Diagnostics, EventLevel,
 };
-use crate::hotkeys::{CaptureAction, HotkeyManager};
+pub use crate::hotkeys::CaptureAction;
+use crate::hotkeys::HotkeyManager;
+use crate::overlay::OverlayCoordinator;
 
 pub const DOWNLOADS_SUBFOLDER: &str = "NewPic";
 
@@ -54,7 +56,7 @@ pub fn encoding_for(save: &SaveSettings) -> ImageEncoding {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SelectionMode {
     FreeRegion,
@@ -62,7 +64,7 @@ pub enum SelectionMode {
 }
 
 /// Payload sent to the selection overlay.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectionRequest {
     pub action: CaptureAction,
     pub mode: SelectionMode,
@@ -218,6 +220,7 @@ pub struct AppState {
     pub hotkeys: Mutex<HotkeyManager>,
     pub autostart: Mutex<AutostartStatus>,
     pub log: Mutex<DiagnosticLog>,
+    pub overlay: Mutex<OverlayCoordinator>,
     provider: Box<dyn CaptureProvider>,
     clipboard: Box<dyn ImageClipboard + Send + Sync>,
     capture_busy: AtomicBool,
@@ -240,6 +243,7 @@ impl AppState {
             hotkeys: Mutex::new(HotkeyManager::new()),
             autostart: Mutex::new(AutostartStatus::Unknown),
             log: Mutex::new(DiagnosticLog::default()),
+            overlay: Mutex::new(OverlayCoordinator::new()),
             provider,
             clipboard,
             capture_busy: AtomicBool::new(false),
@@ -268,6 +272,13 @@ impl AppState {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .ok()
             .map(|_| CaptureGuard(&self.capture_busy))
+    }
+
+    pub fn displays(
+        &self,
+    ) -> Result<Vec<newpic_platform::geometry::Display>, newpic_platform::capture::CaptureError>
+    {
+        self.provider.displays()
     }
 
     pub fn capture(&self, source: CaptureSource) -> Result<CapturedImage, String> {
