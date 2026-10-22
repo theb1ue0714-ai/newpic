@@ -6,3 +6,11 @@ license.workspace = true
 
 [dependencies]
 newpic-platform = { path = "../newpic-platform" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "=0.13.13", default-features = false, features = ["async-io", "screenshot"] }
+futures-lite = "=2.6.1"
+image = { workspace = true, default-features = false, features = ["png"] }
+libwayshot-xcap = "=0.3.3"
+url = "=2.5.8"
+xcap.workspace = true

@@ -6,3 +6,12 @@ license.workspace = true
 
 [dependencies]
 newpic-platform = { path = "../newpic-platform" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+xcap = { workspace = true, features = ["wgc"] }
+windows = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Storage_Xps",
+  "Win32_UI_WindowsAndMessaging",
+] }

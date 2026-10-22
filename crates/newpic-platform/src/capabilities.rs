@@ -4,6 +4,9 @@
 pub enum CaptureBackend {
     WindowsGraphicsCapture,
     WindowsGdi,
+    /// CoreGraphics `CGWindowListCreateImage`, as used by xcap 0.9.8 for
+    /// still-image capture. This must not be reported as ScreenCaptureKit.
+    MacOsCoreGraphics,
     MacOsScreenCaptureKit,
     X11,
     XdgDesktopPortal,
