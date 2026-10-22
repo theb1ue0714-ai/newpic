@@ -1,0 +1,17 @@
+{
+  "schema_version": 0,
+  "autostart": false,
+  "save_enabled": false,
+  "save_directory": "downloads_new_pic",
+  "image_format": "jpeg",
+  "jpeg_quality": 72,
+  "naming_pattern": "archive-%Y-%m-%d-%c",
+  "minimum_width": 5,
+  "clipboard_enabled": false,
+  "fixed_region_width": 640,
+  "fixed_region_height": 480,
+  "region_hotkey": "Ctrl+Shift+7",
+  "repeat_region_hotkey": "Ctrl+Shift+8",
+  "fixed_region_hotkey": "Ctrl+Shift+9",
+  "active_window_hotkey": "Ctrl+Shift+0"
+}
