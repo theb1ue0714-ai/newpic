@@ -127,27 +127,62 @@ impl ClipboardFailure {
     }
 }
 
-/// Independent outcomes of one delivery where at least one output succeeded.
+/// Which outputs a delivery should attempt. Disabled outputs are skipped,
+/// not reported as failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputSelection {
+    storage: bool,
+    clipboard: bool,
+}
+
+impl OutputSelection {
+    pub const ALL: Self = Self::new(true, true);
+
+    pub const fn new(storage: bool, clipboard: bool) -> Self {
+        Self { storage, clipboard }
+    }
+
+    pub const fn storage(self) -> bool {
+        self.storage
+    }
+
+    pub const fn clipboard(self) -> bool {
+        self.clipboard
+    }
+}
+
+/// Independent outcomes of one delivery where at least one selected output
+/// succeeded. `None` marks an output that was not selected.
 #[derive(Debug)]
 pub struct DeliveryReport {
     encoding: ImageEncoding,
-    storage: Result<StoredOutput, StorageFailure>,
-    clipboard: Result<u32, ClipboardFailure>,
+    storage: Option<Result<StoredOutput, StorageFailure>>,
+    clipboard: Option<Result<u32, ClipboardFailure>>,
 }
 
 impl DeliveryReport {
-    /// True when both outputs succeeded. A recovery-folder save counts as a
-    /// successful save; inspect [`Self::recovered`] to warn the user.
+    /// True when every selected output succeeded. A recovery-folder save
+    /// counts as a successful save; inspect [`Self::recovered`] to warn the
+    /// user.
     pub fn is_complete(&self) -> bool {
-        self.storage.is_ok() && self.clipboard.is_ok()
+        self.storage.as_ref().is_none_or(Result::is_ok)
+            && self.clipboard.as_ref().is_none_or(Result::is_ok)
     }
 
     pub const fn encoding(&self) -> ImageEncoding {
         self.encoding
     }
 
+    pub const fn storage_skipped(&self) -> bool {
+        self.storage.is_none()
+    }
+
+    pub const fn clipboard_skipped(&self) -> bool {
+        self.clipboard.is_none()
+    }
+
     pub fn stored(&self) -> Option<&StoredOutput> {
-        self.storage.as_ref().ok()
+        self.storage.as_ref()?.as_ref().ok()
     }
 
     /// The file holding the capture, including a recovery-folder path.
@@ -163,16 +198,16 @@ impl DeliveryReport {
     }
 
     pub fn storage_error(&self) -> Option<&StorageFailure> {
-        self.storage.as_ref().err()
+        self.storage.as_ref()?.as_ref().err()
     }
 
     /// Attempts used by a successful clipboard write.
     pub fn clipboard_attempts(&self) -> Option<u32> {
-        self.clipboard.as_ref().ok().copied()
+        self.clipboard.as_ref()?.as_ref().ok().copied()
     }
 
     pub fn clipboard_failure(&self) -> Option<&ClipboardFailure> {
-        self.clipboard.as_ref().err()
+        self.clipboard.as_ref()?.as_ref().err()
     }
 }
 
@@ -185,6 +220,15 @@ pub enum DeliveryError {
         storage: StorageFailure,
         clipboard: ClipboardFailure,
     },
+    /// Storage was the only selected output and it failed.
+    #[error("capture was not saved: {0}")]
+    Storage(StorageFailure),
+    /// The clipboard was the only selected output and it failed.
+    #[error("capture was not copied: {0}")]
+    Clipboard(ClipboardFailure),
+    /// Both outputs are disabled, so the capture has nowhere to go.
+    #[error("both file saving and clipboard output are disabled")]
+    NoOutputSelected,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -252,10 +296,30 @@ impl<'a> CapturePipeline<'a> {
         image: &CapturedImage,
         encoding: ImageEncoding,
     ) -> Result<DeliveryReport, DeliveryError> {
-        let storage = self.deliver_to_storage(image, encoding);
-        let clipboard = self.deliver_to_clipboard(image);
+        self.deliver_selected(image, encoding, OutputSelection::ALL)
+    }
+
+    /// Attempts every selected output and reports each outcome. Returns an
+    /// error only when no selected output succeeded.
+    pub fn deliver_selected(
+        &self,
+        image: &CapturedImage,
+        encoding: ImageEncoding,
+        selection: OutputSelection,
+    ) -> Result<DeliveryReport, DeliveryError> {
+        let storage = selection
+            .storage()
+            .then(|| self.deliver_to_storage(image, encoding));
+        let clipboard = selection
+            .clipboard()
+            .then(|| self.deliver_to_clipboard(image));
         match (storage, clipboard) {
-            (Err(storage), Err(clipboard)) => Err(DeliveryError::Outputs { storage, clipboard }),
+            (None, None) => Err(DeliveryError::NoOutputSelected),
+            (Some(Err(storage)), Some(Err(clipboard))) => {
+                Err(DeliveryError::Outputs { storage, clipboard })
+            }
+            (Some(Err(storage)), None) => Err(DeliveryError::Storage(storage)),
+            (None, Some(Err(clipboard))) => Err(DeliveryError::Clipboard(clipboard)),
             (storage, clipboard) => Ok(DeliveryReport {
                 encoding,
                 storage,

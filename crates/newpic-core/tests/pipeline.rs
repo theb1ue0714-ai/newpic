@@ -6,7 +6,7 @@ use std::time::Duration;
 use image::ImageReader;
 use newpic_core::image_output::{encode_image, ImageEncoding, JpegQuality};
 use newpic_core::pipeline::{
-    CapturePipeline, DeliveryError, ImageStore, ImageStoreError, StoredOutput,
+    CapturePipeline, DeliveryError, ImageStore, ImageStoreError, OutputSelection, StoredOutput,
 };
 use newpic_core::storage::{RecoveredImage, StorageError};
 use newpic_platform::capture::{
@@ -351,4 +351,78 @@ fn recovered_storage_result_is_propagated_with_primary_error() {
         .to_string()
         .contains("already in use"));
     assert!(report.is_complete());
+}
+
+#[test]
+fn disabled_storage_is_skipped_and_clipboard_alone_completes() {
+    let store = FakeStore::new(StoreBehavior::Stored);
+    let clipboard = FakeClipboard::new(vec![Ok(())]);
+
+    let report = pipeline(&store, &clipboard)
+        .deliver_selected(
+            &test_image(),
+            ImageEncoding::Png,
+            OutputSelection::new(false, true),
+        )
+        .unwrap();
+
+    assert!(report.is_complete());
+    assert!(report.storage_skipped());
+    assert_eq!(report.stored_path(), None);
+    assert_eq!(store.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(report.clipboard_attempts(), Some(1));
+}
+
+#[test]
+fn disabled_clipboard_is_skipped_and_storage_alone_completes() {
+    let store = FakeStore::new(StoreBehavior::Stored);
+    let clipboard = FakeClipboard::new(vec![Ok(())]);
+
+    let report = pipeline(&store, &clipboard)
+        .deliver_selected(
+            &test_image(),
+            ImageEncoding::Png,
+            OutputSelection::new(true, false),
+        )
+        .unwrap();
+
+    assert!(report.is_complete());
+    assert!(report.clipboard_skipped());
+    assert_eq!(clipboard.calls.load(Ordering::SeqCst), 0);
+    assert!(report.stored_path().is_some());
+}
+
+#[test]
+fn the_only_selected_output_failing_is_an_error() {
+    let store = FakeStore::new(StoreBehavior::Failed);
+    let clipboard = FakeClipboard::new(vec![Ok(())]);
+
+    let failure = pipeline(&store, &clipboard)
+        .deliver_selected(
+            &test_image(),
+            ImageEncoding::Png,
+            OutputSelection::new(true, false),
+        )
+        .expect_err("only output failed");
+
+    assert!(matches!(failure, DeliveryError::Storage(_)));
+    assert_eq!(clipboard.calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn selecting_no_output_is_rejected_without_touching_either_port() {
+    let store = FakeStore::new(StoreBehavior::Stored);
+    let clipboard = FakeClipboard::new(vec![Ok(())]);
+
+    let failure = pipeline(&store, &clipboard)
+        .deliver_selected(
+            &test_image(),
+            ImageEncoding::Png,
+            OutputSelection::new(false, false),
+        )
+        .expect_err("nothing selected");
+
+    assert!(matches!(failure, DeliveryError::NoOutputSelected));
+    assert_eq!(store.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(clipboard.calls.load(Ordering::SeqCst), 0);
 }
