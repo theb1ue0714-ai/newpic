@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "vitest --passWithNoTests",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri"
   },

@@ -1,8 +1,9 @@
 fn main() {
     // Tauri embeds a window icon on desktop targets even when bundling is
-    // disabled. Keep the scaffold free of provisional brand artwork by
-    // generating a neutral one-pixel build artifact until NewPic has an
-    // approved icon set.
+    // disabled. This byte sequence was independently generated for NewPic;
+    // it encodes a neutral 1x1 RGBA PNG and is not derived from PicPick or
+    // any other product asset. Generate it only as a build artifact until
+    // NewPic has an approved, original icon set.
     const PLACEHOLDER_ICON: &[u8] = &[
         0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
         0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
