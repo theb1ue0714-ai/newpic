@@ -1,10 +1,13 @@
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+static BACKUP_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
@@ -264,14 +267,23 @@ struct SchemaZeroSettings {
 }
 
 pub fn migrate_json(json: &str) -> Result<Settings, SettingsMigrationError> {
+    decode_json(json).map(|decoded| decoded.settings)
+}
+
+struct DecodedSettings {
+    settings: Settings,
+    migrated: bool,
+}
+
+fn decode_json(json: &str) -> Result<DecodedSettings, SettingsMigrationError> {
     let envelope: SchemaEnvelope = serde_json::from_str(json)?;
-    let settings = match envelope.schema_version {
-        0 => migrate_schema_zero(serde_json::from_str(json)?),
-        1 => serde_json::from_str(json)?,
+    let (settings, migrated) = match envelope.schema_version {
+        0 => (migrate_schema_zero(serde_json::from_str(json)?), true),
+        1 => (serde_json::from_str(json)?, false),
         version => return Err(SettingsMigrationError::UnsupportedSchema(version)),
     };
     settings.validate()?;
-    Ok(settings)
+    Ok(DecodedSettings { settings, migrated })
 }
 
 fn migrate_schema_zero(old: SchemaZeroSettings) -> Settings {
@@ -322,7 +334,7 @@ impl JsonFileSettingsRepository {
         &self.path
     }
 
-    fn next_corrupted_backup_path(&self) -> PathBuf {
+    fn corrupted_backup_path(&self, sequence: u64) -> PathBuf {
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
         let stem = self
             .path
@@ -331,22 +343,16 @@ impl JsonFileSettingsRepository {
             .unwrap_or("settings");
         let extension = self.path.extension().and_then(|value| value.to_str());
 
-        for sequence in 0_u64.. {
-            let suffix = if sequence == 0 {
-                String::new()
-            } else {
-                format!("-{sequence}")
-            };
-            let name = match extension {
-                Some(extension) => format!("{stem}.corrupt{suffix}.{extension}"),
-                None => format!("{stem}.corrupt{suffix}"),
-            };
-            let candidate = parent.join(name);
-            if !candidate.exists() {
-                return candidate;
-            }
-        }
-        unreachable!("the backup sequence is unbounded")
+        let suffix = if sequence == 0 {
+            String::new()
+        } else {
+            format!("-{sequence}")
+        };
+        let name = match extension {
+            Some(extension) => format!("{stem}.corrupt{suffix}.{extension}"),
+            None => format!("{stem}.corrupt{suffix}"),
+        };
+        parent.join(name)
     }
 }
 
@@ -361,19 +367,74 @@ impl SettingsRepository for JsonFileSettingsRepository {
 
     fn save(&self, settings: &Settings) -> Result<(), SettingsRepositoryError> {
         settings.validate()?;
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let json = serde_json::to_string_pretty(settings)?;
-        fs::write(&self.path, format!("{json}\n"))?;
+        let parent = nonempty_parent(&self.path);
+        fs::create_dir_all(parent)?;
+        let mut json = serde_json::to_vec_pretty(settings)?;
+        json.push(b'\n');
+
+        let mut temporary = tempfile::Builder::new()
+            .prefix(".newpic-settings-")
+            .tempfile_in(parent)?;
+        temporary.write_all(&json)?;
+        temporary.flush()?;
+        temporary.as_file().sync_all()?;
+        temporary.persist(&self.path).map_err(|error| error.error)?;
+        let _ = sync_directory(parent);
         Ok(())
     }
 
     fn backup_corrupted(&self) -> Result<PathBuf, SettingsRepositoryError> {
-        let backup_path = self.next_corrupted_backup_path();
-        fs::rename(&self.path, &backup_path)?;
-        Ok(backup_path)
+        let _backup_guard = BACKUP_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for sequence in 0_u64.. {
+            let backup_path = self.corrupted_backup_path(sequence);
+            let backup = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&backup_path);
+            let mut backup = match backup {
+                Ok(backup) => backup,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            };
+
+            let backup_result = (|| -> io::Result<()> {
+                let mut source = File::open(&self.path)?;
+                io::copy(&mut source, &mut backup)?;
+                backup.flush()?;
+                backup.sync_all()?;
+                drop(source);
+                fs::remove_file(&self.path)?;
+                let _ = sync_directory(nonempty_parent(&self.path));
+                Ok(())
+            })();
+
+            if let Err(error) = backup_result {
+                drop(backup);
+                let _ = fs::remove_file(&backup_path);
+                return Err(error.into());
+            }
+            return Ok(backup_path);
+        }
+        unreachable!("the backup sequence is unbounded")
     }
+}
+
+fn nonempty_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> io::Result<()> {
+    File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 #[derive(Debug, Error)]
@@ -417,11 +478,13 @@ pub fn load_or_recover<R: SettingsRepository>(
         });
     };
 
-    match migrate_json(&json) {
-        Ok(settings) => {
-            repository.save(&settings)?;
+    match decode_json(&json) {
+        Ok(decoded) => {
+            if decoded.migrated {
+                repository.save(&decoded.settings)?;
+            }
             Ok(LoadSettingsOutcome {
-                settings,
+                settings: decoded.settings,
                 notice: None,
             })
         }
