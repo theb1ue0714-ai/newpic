@@ -4,5 +4,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# Native clipboard adapter. Kept optional so the shared contracts build
+# without platform clipboard libraries.
+arboard = ["dep:arboard"]
+
 [dependencies]
+arboard = { workspace = true, optional = true }
 thiserror.workspace = true
+
+# Wayland sessions need the data-control protocol for image clipboard writes.
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard = { workspace = true, optional = true, features = ["wayland-data-control"] }

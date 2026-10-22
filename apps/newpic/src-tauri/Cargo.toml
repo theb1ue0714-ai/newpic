@@ -14,3 +14,4 @@ tauri-build.workspace = true
 [dependencies]
 tauri.workspace = true
 newpic-core = { path = "../../../crates/newpic-core" }
+newpic-platform = { path = "../../../crates/newpic-platform", features = ["arboard"] }

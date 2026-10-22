@@ -9,12 +9,12 @@ use newpic_core::pipeline::{
     CapturePipeline, DeliveryError, ImageStore, ImageStoreError, StoredOutput,
 };
 use newpic_core::storage::{RecoveredImage, StorageError};
-use newpic_platform::clipboard::{
-    ClipboardError, ClipboardErrorKind, ClipboardImage, ImageClipboard,
-};
 use newpic_platform::capture::{
     CaptureProvenance, CaptureScaleMetadata, CaptureScaleSegment, CaptureScaleSource,
     CapturedImage, DisplayScaleSource,
+};
+use newpic_platform::clipboard::{
+    ClipboardError, ClipboardErrorKind, ClipboardImage, ImageClipboard,
 };
 use newpic_platform::geometry::{DisplayId, PhysicalRect, ScaleFactor};
 
@@ -119,7 +119,10 @@ fn storage_and_clipboard_success_produce_complete_report() {
         .expect("complete delivery");
 
     assert!(report.is_complete());
-    assert_eq!(report.stored_path(), Some(PathBuf::from("/captures/001.png").as_path()));
+    assert_eq!(
+        report.stored_path(),
+        Some(PathBuf::from("/captures/001.png").as_path())
+    );
     assert_eq!(report.clipboard_attempts(), Some(1));
 }
 
@@ -136,7 +139,10 @@ fn clipboard_failure_preserves_successful_storage_path() {
         .expect("partial delivery");
 
     assert!(!report.is_complete());
-    assert_eq!(report.stored_path(), Some(PathBuf::from("/captures/001.png").as_path()));
+    assert_eq!(
+        report.stored_path(),
+        Some(PathBuf::from("/captures/001.png").as_path())
+    );
     assert_eq!(report.clipboard_failure().unwrap().attempts(), 1);
 }
 
@@ -172,7 +178,10 @@ fn two_output_failures_are_aggregated_after_both_are_attempted() {
     assert!(storage.to_string().contains("disk unavailable"));
     assert_eq!(clipboard.attempts(), 1);
     assert_eq!(store.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(clipboard.error().kind(), ClipboardErrorKind::PermissionDenied);
+    assert_eq!(
+        clipboard.error().kind(),
+        ClipboardErrorKind::PermissionDenied
+    );
 }
 
 #[test]
@@ -264,7 +273,9 @@ fn padded_rows_and_mixed_scale_metadata_encode_only_real_pixels_without_mutation
     .unwrap();
 
     let encoded = encode_image(&image, ImageEncoding::Png).unwrap();
-    let decoded = image::load_from_memory(encoded.bytes()).unwrap().into_rgba8();
+    let decoded = image::load_from_memory(encoded.bytes())
+        .unwrap()
+        .into_rgba8();
 
     assert_eq!(
         decoded.as_raw(),
@@ -335,6 +346,9 @@ fn recovered_storage_result_is_propagated_with_primary_error() {
 
     let recovered = report.recovered().expect("recovery result");
     assert_eq!(recovered.path, PathBuf::from("/recovery/001.png"));
-    assert!(recovered.primary_error.to_string().contains("already in use"));
+    assert!(recovered
+        .primary_error
+        .to_string()
+        .contains("already in use"));
     assert!(report.is_complete());
 }
