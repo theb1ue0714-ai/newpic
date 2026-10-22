@@ -12,7 +12,11 @@ arboard = ["dep:arboard"]
 
 [dependencies]
 arboard = { workspace = true, optional = true }
+serde.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
 
 # Wayland sessions need the data-control protocol for image clipboard writes.
 [target.'cfg(target_os = "linux")'.dependencies]

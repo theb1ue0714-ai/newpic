@@ -2733,6 +2733,8 @@ name = "newpic-platform"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "serde",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 

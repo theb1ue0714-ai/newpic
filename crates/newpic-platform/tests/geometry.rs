@@ -6,8 +6,8 @@ use newpic_platform::capture::{
 };
 use newpic_platform::geometry::{
     fixed_region_at, intersections_with_displays, Display, DisplayId, DisplayOrientation,
-    LogicalPoint, PhysicalPoint, PhysicalRect, PhysicalSize, SavedRegion, SavedRegionDecision,
-    SavedRegionInvalidation, ScaleFactor,
+    LogicalPoint, PhysicalPoint, PhysicalRect, PhysicalSize, SavedFixedRegion, SavedRegion,
+    SavedRegionDecision, SavedRegionInvalidation, ScaleFactor,
 };
 
 fn display(id: &str, x: i32, y: i32, width: u32, height: u32, scale: f64) -> Display {
@@ -22,6 +22,170 @@ fn display(id: &str, x: i32, y: i32, width: u32, height: u32, scale: f64) -> Dis
             DisplayOrientation::Portrait
         },
     )
+}
+
+fn primary_display(id: &str, x: i32, y: i32, width: u32, height: u32, scale: f64) -> Display {
+    Display::new(
+        DisplayId::new(id).unwrap(),
+        PhysicalRect::new(x, y, width, height).expect("valid display bounds"),
+        ScaleFactor::new(scale).expect("valid scale factor"),
+        true,
+        if width >= height {
+            DisplayOrientation::Landscape
+        } else {
+            DisplayOrientation::Portrait
+        },
+    )
+}
+
+#[test]
+fn saved_fixed_region_restores_exactly_on_unchanged_display() {
+    let displays = vec![primary_display("main", 0, 0, 1920, 1080, 1.0)];
+    let rect = PhysicalRect::new(220, 140, 900, 520).unwrap();
+    let saved = SavedFixedRegion::capture(rect, &displays).unwrap();
+
+    assert_eq!(saved.resolve(&displays).unwrap(), rect);
+}
+
+#[test]
+fn saved_fixed_region_preserves_negative_origins() {
+    let displays = vec![primary_display("left", -1920, -200, 1920, 1080, 1.0)];
+    let rect = PhysicalRect::new(-1800, -120, 800, 600).unwrap();
+    let saved = SavedFixedRegion::capture(rect, &displays).unwrap();
+
+    assert_eq!(saved.rect(), rect);
+    assert_eq!(saved.resolve(&displays).unwrap(), rect);
+}
+
+#[test]
+fn saved_fixed_region_moves_inside_primary_when_topology_changes() {
+    let saved = SavedFixedRegion::capture(
+        PhysicalRect::new(-1200, 80, 640, 480).unwrap(),
+        &[display("left", -1280, 0, 1280, 1024, 1.0)],
+    )
+    .unwrap();
+    let current = vec![primary_display("main", 0, 0, 500, 400, 1.25)];
+
+    assert_eq!(
+        saved.resolve(&current).unwrap(),
+        PhysicalRect::new(0, 0, 500, 400).unwrap()
+    );
+}
+
+#[test]
+fn saved_fixed_region_centers_on_primary_after_scale_or_orientation_changes() {
+    let original = primary_display("main", 0, 0, 1920, 1080, 1.0);
+    let saved = SavedFixedRegion::capture(
+        PhysicalRect::new(100, 80, 800, 600).unwrap(),
+        std::slice::from_ref(&original),
+    )
+    .unwrap();
+    let scaled = Display::new(
+        original.id().clone(),
+        original.bounds(),
+        ScaleFactor::new(1.25).unwrap(),
+        true,
+        DisplayOrientation::Portrait,
+    );
+
+    assert_eq!(
+        saved.resolve(&[scaled]).unwrap(),
+        PhysicalRect::new(560, 240, 800, 600).unwrap()
+    );
+}
+
+#[test]
+fn saved_fixed_region_uses_primary_when_saved_display_is_missing() {
+    let saved = SavedFixedRegion::capture(
+        PhysicalRect::new(-900, 100, 600, 400).unwrap(),
+        &[display("removed", -1280, 0, 1280, 1024, 1.0)],
+    )
+    .unwrap();
+    let current = vec![
+        display("secondary", 1920, 0, 1280, 1024, 1.0),
+        primary_display("main", 0, 0, 1920, 1080, 1.0),
+    ];
+
+    assert_eq!(
+        saved.resolve(&current).unwrap(),
+        PhysicalRect::new(660, 340, 600, 400).unwrap()
+    );
+}
+
+#[test]
+fn saved_fixed_region_rejects_duplicate_ids_and_multi_display_rectangles() {
+    let duplicate_a = primary_display("same", 0, 0, 100, 100, 1.0);
+    let duplicate_b = display("same", 100, 0, 100, 100, 1.0);
+    assert!(SavedFixedRegion::capture(
+        PhysicalRect::new(10, 10, 40, 40).unwrap(),
+        &[duplicate_a, duplicate_b]
+    )
+    .is_err());
+
+    let left = display("left", -100, 0, 100, 100, 1.0);
+    let right = primary_display("right", 0, 0, 100, 100, 1.0);
+    assert!(
+        SavedFixedRegion::capture(PhysicalRect::new(-20, 10, 40, 40).unwrap(), &[left, right])
+            .is_err()
+    );
+}
+
+#[test]
+fn saved_fixed_region_with_size_preserves_or_clamps_top_left() {
+    let displays = vec![primary_display("main", -100, -50, 1000, 700, 1.0)];
+    let saved =
+        SavedFixedRegion::capture(PhysicalRect::new(100, 100, 300, 200).unwrap(), &displays)
+            .unwrap();
+
+    let preserved = saved
+        .with_size(PhysicalSize::new(400, 300).unwrap(), &displays)
+        .unwrap();
+    assert_eq!(
+        preserved.rect(),
+        PhysicalRect::new(100, 100, 400, 300).unwrap()
+    );
+
+    let clamped = saved
+        .with_size(PhysicalSize::new(900, 650).unwrap(), &displays)
+        .unwrap();
+    assert_eq!(clamped.rect(), PhysicalRect::new(0, 0, 900, 650).unwrap());
+}
+
+#[test]
+fn saved_fixed_region_serialization_round_trip_preserves_validated_geometry() {
+    let displays = vec![primary_display("left", -1920, -200, 1920, 1080, 1.25)];
+    let saved =
+        SavedFixedRegion::capture(PhysicalRect::new(-1800, -120, 800, 600).unwrap(), &displays)
+            .unwrap();
+
+    let json = serde_json::to_string(&saved).unwrap();
+    let restored: SavedFixedRegion = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(restored, saved);
+}
+
+#[test]
+fn saved_fixed_region_deserialization_rejects_invalid_private_geometry() {
+    let zero_width = r#"{
+        "rect":{"x":0,"y":0,"width":0,"height":10},
+        "display":{
+            "id":"main",
+            "bounds":{"x":0,"y":0,"width":100,"height":100},
+            "scale_factor":1.0,
+            "orientation":"Landscape"
+        }
+    }"#;
+    let invalid_scale = zero_width
+        .replace("\"width\":0", "\"width\":10")
+        .replace("\"scale_factor\":1.0", "\"scale_factor\":0.0");
+    let overflowing = zero_width.replace(
+        "\"x\":0,\"y\":0,\"width\":0",
+        "\"x\":2147483647,\"y\":0,\"width\":2",
+    );
+
+    assert!(serde_json::from_str::<SavedFixedRegion>(zero_width).is_err());
+    assert!(serde_json::from_str::<SavedFixedRegion>(&invalid_scale).is_err());
+    assert!(serde_json::from_str::<SavedFixedRegion>(&overflowing).is_err());
 }
 
 #[test]

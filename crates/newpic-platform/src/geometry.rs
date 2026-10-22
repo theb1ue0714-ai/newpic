@@ -1,3 +1,4 @@
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -181,7 +182,7 @@ pub struct Display {
     orientation: DisplayOrientation,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DisplayOrientation {
     Landscape,
     Portrait,
@@ -304,6 +305,186 @@ struct DisplayFingerprint {
     bounds: PhysicalRect,
     scale_factor: ScaleFactor,
     orientation: DisplayOrientation,
+}
+
+/// A persistent F9 rectangle and the exact display geometry against which it
+/// was confirmed. Unlike `SavedRegion`, this contract deliberately represents
+/// a rectangle contained by one display only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedFixedRegion {
+    rect: PhysicalRect,
+    display: DisplayFingerprint,
+}
+
+impl SavedFixedRegion {
+    pub fn capture(rect: PhysicalRect, displays: &[Display]) -> Result<Self, GeometryError> {
+        ensure_unique_display_ids(displays)?;
+        let mut containing = displays
+            .iter()
+            .filter(|display| rect_is_contained_by(rect, display.bounds()));
+        let display = containing
+            .next()
+            .ok_or(GeometryError::RegionNotContainedBySingleDisplay)?;
+        if containing.next().is_some() {
+            return Err(GeometryError::RegionNotContainedBySingleDisplay);
+        }
+
+        Ok(Self {
+            rect,
+            display: DisplayFingerprint::from(display),
+        })
+    }
+
+    pub const fn rect(&self) -> PhysicalRect {
+        self.rect
+    }
+
+    pub fn resolve(&self, current: &[Display]) -> Result<PhysicalRect, GeometryError> {
+        ensure_unique_display_ids(current)?;
+        if current
+            .iter()
+            .any(|display| DisplayFingerprint::from(display) == self.display)
+        {
+            return Ok(self.rect);
+        }
+
+        let primary = unique_primary_display(current)?;
+        centered_rect(self.rect.size(), primary.bounds())
+    }
+
+    /// Applies a Settings size edit. On an unchanged display the stored
+    /// top-left is retained when possible and moved only as far as necessary
+    /// to fit. After a topology change, the resolved primary-display position
+    /// becomes the new anchor.
+    pub fn with_size(
+        &self,
+        size: PhysicalSize,
+        displays: &[Display],
+    ) -> Result<Self, GeometryError> {
+        ensure_unique_display_ids(displays)?;
+        let matching = displays
+            .iter()
+            .find(|display| DisplayFingerprint::from(*display) == self.display);
+        let (display, origin) = match matching {
+            Some(display) => (display, self.rect.origin()),
+            None => {
+                let display = unique_primary_display(displays)?;
+                (display, self.resolve(displays)?.origin())
+            }
+        };
+        let rect = clamp_rect(origin, size, display.bounds())?;
+
+        Ok(Self {
+            rect,
+            display: DisplayFingerprint::from(display),
+        })
+    }
+
+    fn from_persisted(
+        rect: PhysicalRect,
+        display: DisplayFingerprint,
+    ) -> Result<Self, GeometryError> {
+        if !rect_is_contained_by(rect, display.bounds) {
+            return Err(GeometryError::RegionNotContainedBySingleDisplay);
+        }
+        Ok(Self { rect, display })
+    }
+}
+
+#[derive(Serialize)]
+struct SavedFixedRegionSerializeDto<'a> {
+    rect: RectSerializeDto,
+    display: DisplayFingerprintSerializeDto<'a>,
+}
+
+#[derive(Serialize)]
+struct RectSerializeDto {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+impl From<PhysicalRect> for RectSerializeDto {
+    fn from(rect: PhysicalRect) -> Self {
+        Self {
+            x: rect.origin().x,
+            y: rect.origin().y,
+            width: rect.size().width(),
+            height: rect.size().height(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct DisplayFingerprintSerializeDto<'a> {
+    id: &'a str,
+    bounds: RectSerializeDto,
+    scale_factor: f64,
+    orientation: DisplayOrientation,
+}
+
+impl Serialize for SavedFixedRegion {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        SavedFixedRegionSerializeDto {
+            rect: self.rect.into(),
+            display: DisplayFingerprintSerializeDto {
+                id: self.display.id.as_str(),
+                bounds: self.display.bounds.into(),
+                scale_factor: self.display.scale_factor.get(),
+                orientation: self.display.orientation,
+            },
+        }
+        .serialize(serializer)
+    }
+}
+
+#[derive(Deserialize)]
+struct SavedFixedRegionDeserializeDto {
+    rect: RectDeserializeDto,
+    display: DisplayFingerprintDeserializeDto,
+}
+
+#[derive(Deserialize)]
+struct RectDeserializeDto {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+impl RectDeserializeDto {
+    fn validate(self) -> Result<PhysicalRect, GeometryError> {
+        PhysicalRect::new(self.x, self.y, self.width, self.height)
+    }
+}
+
+#[derive(Deserialize)]
+struct DisplayFingerprintDeserializeDto {
+    id: String,
+    bounds: RectDeserializeDto,
+    scale_factor: f64,
+    orientation: DisplayOrientation,
+}
+
+impl<'de> Deserialize<'de> for SavedFixedRegion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = SavedFixedRegionDeserializeDto::deserialize(deserializer)?;
+        let rect = value.rect.validate().map_err(D::Error::custom)?;
+        let display = DisplayFingerprint {
+            id: DisplayId::new(value.display.id).map_err(D::Error::custom)?,
+            bounds: value.display.bounds.validate().map_err(D::Error::custom)?,
+            scale_factor: ScaleFactor::new(value.display.scale_factor).map_err(D::Error::custom)?,
+            orientation: value.display.orientation,
+        };
+        Self::from_persisted(rect, display).map_err(D::Error::custom)
+    }
 }
 
 impl SavedRegion {
@@ -473,6 +654,58 @@ fn ensure_unique_display_ids(displays: &[Display]) -> Result<(), GeometryError> 
     Ok(())
 }
 
+fn unique_primary_display(displays: &[Display]) -> Result<&Display, GeometryError> {
+    let mut primary = displays.iter().filter(|display| display.is_primary());
+    let display = primary
+        .next()
+        .ok_or(GeometryError::PrimaryDisplayUnavailable)?;
+    if primary.next().is_some() {
+        return Err(GeometryError::MultiplePrimaryDisplays);
+    }
+    Ok(display)
+}
+
+fn rect_is_contained_by(rect: PhysicalRect, bounds: PhysicalRect) -> bool {
+    rect.left() >= bounds.left()
+        && rect.top() >= bounds.top()
+        && rect.right() <= bounds.right()
+        && rect.bottom() <= bounds.bottom()
+}
+
+fn centered_rect(size: PhysicalSize, bounds: PhysicalRect) -> Result<PhysicalRect, GeometryError> {
+    let width = size.width().min(bounds.size().width());
+    let height = size.height().min(bounds.size().height());
+    let x = bounds.left() + (bounds.right() - bounds.left() - i64::from(width)) / 2;
+    let y = bounds.top() + (bounds.bottom() - bounds.top() - i64::from(height)) / 2;
+    clamp_rect(
+        PhysicalPoint::new(
+            i32::try_from(x).map_err(|_| GeometryError::CoordinateOutOfRange)?,
+            i32::try_from(y).map_err(|_| GeometryError::CoordinateOutOfRange)?,
+        ),
+        PhysicalSize::new(width, height)?,
+        bounds,
+    )
+}
+
+fn clamp_rect(
+    origin: PhysicalPoint,
+    size: PhysicalSize,
+    bounds: PhysicalRect,
+) -> Result<PhysicalRect, GeometryError> {
+    let width = size.width().min(bounds.size().width());
+    let height = size.height().min(bounds.size().height());
+    let max_x = bounds.right() - i64::from(width);
+    let max_y = bounds.bottom() - i64::from(height);
+    let x = i64::from(origin.x).clamp(bounds.left(), max_x);
+    let y = i64::from(origin.y).clamp(bounds.top(), max_y);
+    PhysicalRect::new(
+        i32::try_from(x).map_err(|_| GeometryError::CoordinateOutOfRange)?,
+        i32::try_from(y).map_err(|_| GeometryError::CoordinateOutOfRange)?,
+        width,
+        height,
+    )
+}
+
 fn exact_rectangular_union(pieces: &[PhysicalRect]) -> Option<PhysicalRect> {
     pieces.first()?;
     let left = pieces.iter().map(|piece| piece.left()).min()?;
@@ -607,4 +840,10 @@ pub enum GeometryError {
     EmptyDisplayId,
     #[error("display identifier appears more than once: {0:?}")]
     DuplicateDisplayId(DisplayId),
+    #[error("fixed region must be fully contained by exactly one display")]
+    RegionNotContainedBySingleDisplay,
+    #[error("current topology does not contain a primary display")]
+    PrimaryDisplayUnavailable,
+    #[error("current topology contains more than one primary display")]
+    MultiplePrimaryDisplays,
 }
