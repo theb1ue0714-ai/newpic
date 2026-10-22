@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 use crate::capabilities::CaptureCapabilities;
-use crate::geometry::{Display, DisplayId, GeometryError, PhysicalRect};
+use crate::geometry::{Display, DisplayId, GeometryError, PhysicalRect, ScaleFactor};
 
 pub trait CaptureProvider: Send + Sync {
     fn capabilities(&self) -> CaptureCapabilities;
@@ -66,39 +66,86 @@ pub enum CaptureProvenance {
     Display(DisplayId),
 }
 
-/// Pixel density metadata retained with captured physical pixels.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PixelScale {
-    horizontal: f64,
-    vertical: f64,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureScaleSegment {
+    image_rect: PhysicalRect,
+    source_display: DisplayId,
+    scale_factor: ScaleFactor,
 }
 
-impl PixelScale {
-    pub const ONE: Self = Self {
-        horizontal: 1.0,
-        vertical: 1.0,
-    };
+impl CaptureScaleSegment {
+    pub const fn new(
+        image_rect: PhysicalRect,
+        source_display: DisplayId,
+        scale_factor: ScaleFactor,
+    ) -> Self {
+        Self {
+            image_rect,
+            source_display,
+            scale_factor,
+        }
+    }
 
-    pub fn new(horizontal: f64, vertical: f64) -> Result<Self, CaptureError> {
-        if !horizontal.is_finite() || horizontal <= 0.0 || !vertical.is_finite() || vertical <= 0.0
+    pub const fn image_rect(&self) -> PhysicalRect {
+        self.image_rect
+    }
+    pub const fn source_display(&self) -> &DisplayId {
+        &self.source_display
+    }
+    pub const fn scale_factor(&self) -> ScaleFactor {
+        self.scale_factor
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CaptureScaleKind {
+    Uniform(ScaleFactor),
+    Mixed(Vec<CaptureScaleSegment>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureScaleMetadata {
+    kind: CaptureScaleKind,
+}
+
+impl CaptureScaleMetadata {
+    pub const fn uniform(scale: ScaleFactor) -> Self {
+        Self {
+            kind: CaptureScaleKind::Uniform(scale),
+        }
+    }
+
+    pub fn mixed(segments: Vec<CaptureScaleSegment>) -> Result<Self, CaptureError> {
+        if segments.len() < 2 {
+            return Err(CaptureError::InvalidScaleSegments(
+                "mixed scale metadata requires at least two segments".into(),
+            ));
+        }
+        if segments
+            .iter()
+            .all(|segment| segment.scale_factor == segments[0].scale_factor)
         {
-            return Err(CaptureError::InvalidPixelScale {
-                horizontal,
-                vertical,
-            });
+            return Err(CaptureError::InvalidScaleSegments(
+                "mixed scale metadata must contain distinct scale factors".into(),
+            ));
         }
         Ok(Self {
-            horizontal,
-            vertical,
+            kind: CaptureScaleKind::Mixed(segments),
         })
     }
 
-    pub const fn horizontal(self) -> f64 {
-        self.horizontal
+    pub fn segments(&self) -> Option<&[CaptureScaleSegment]> {
+        match &self.kind {
+            CaptureScaleKind::Uniform(_) => None,
+            CaptureScaleKind::Mixed(segments) => Some(segments),
+        }
     }
 
-    pub const fn vertical(self) -> f64 {
-        self.vertical
+    pub const fn uniform_scale(&self) -> Option<ScaleFactor> {
+        match &self.kind {
+            CaptureScaleKind::Uniform(scale) => Some(*scale),
+            CaptureScaleKind::Mixed(_) => None,
+        }
     }
 }
 
@@ -109,7 +156,7 @@ pub struct CapturedImage {
     height: u32,
     row_stride: usize,
     rgba: Vec<u8>,
-    scale: PixelScale,
+    scale_metadata: CaptureScaleMetadata,
     provenance: CaptureProvenance,
 }
 
@@ -119,7 +166,7 @@ impl CapturedImage {
         height: u32,
         row_stride: usize,
         rgba: Vec<u8>,
-        scale: PixelScale,
+        scale_metadata: CaptureScaleMetadata,
         provenance: CaptureProvenance,
     ) -> Result<Self, CaptureError> {
         if width == 0 || height == 0 {
@@ -144,12 +191,13 @@ impl CapturedImage {
                 actual: rgba.len(),
             });
         }
+        validate_scale_metadata(width, height, &scale_metadata)?;
         Ok(Self {
             width,
             height,
             row_stride,
             rgba,
-            scale,
+            scale_metadata,
             provenance,
         })
     }
@@ -170,8 +218,8 @@ impl CapturedImage {
         &self.rgba
     }
 
-    pub const fn scale(&self) -> PixelScale {
-        self.scale
+    pub const fn scale_metadata(&self) -> &CaptureScaleMetadata {
+        &self.scale_metadata
     }
 
     pub const fn provenance(&self) -> &CaptureProvenance {
@@ -210,8 +258,54 @@ pub enum CaptureError {
     PixelByteLengthMismatch { expected: usize, actual: usize },
     #[error("captured image layout overflows the supported address space")]
     ImageLayoutOverflow,
-    #[error("pixel scale must be finite and positive, got {horizontal} by {vertical}")]
-    InvalidPixelScale { horizontal: f64, vertical: f64 },
+    #[error("invalid capture scale segments: {0}")]
+    InvalidScaleSegments(String),
+}
+
+fn validate_scale_metadata(
+    width: u32,
+    height: u32,
+    metadata: &CaptureScaleMetadata,
+) -> Result<(), CaptureError> {
+    let CaptureScaleKind::Mixed(segments) = &metadata.kind else {
+        return Ok(());
+    };
+    let mut covered = 0_u128;
+    for (index, segment) in segments.iter().enumerate() {
+        let rect = segment.image_rect();
+        if rect.origin().x < 0
+            || rect.origin().y < 0
+            || rect.right() > i64::from(width)
+            || rect.bottom() > i64::from(height)
+        {
+            return Err(CaptureError::InvalidScaleSegments(
+                "segment is outside image bounds".into(),
+            ));
+        }
+        if segments[..index]
+            .iter()
+            .any(|earlier| earlier.image_rect().intersection(rect).is_some())
+        {
+            return Err(CaptureError::InvalidScaleSegments(
+                "segments overlap".into(),
+            ));
+        }
+        if segments[..index].iter().any(|earlier| {
+            earlier.source_display() == segment.source_display()
+                && earlier.scale_factor() != segment.scale_factor()
+        }) {
+            return Err(CaptureError::InvalidScaleSegments(
+                "one source display reports conflicting scale factors".into(),
+            ));
+        }
+        covered += u128::from(rect.size().width()) * u128::from(rect.size().height());
+    }
+    if covered != u128::from(width) * u128::from(height) {
+        return Err(CaptureError::InvalidScaleSegments(
+            "segments do not cover the image".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn format_hint(hint: &Option<String>) -> String {

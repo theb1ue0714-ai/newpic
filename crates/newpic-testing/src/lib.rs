@@ -1,5 +1,6 @@
 //! Shared test fixtures and platform test helpers for NewPic.
 
+use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use newpic_platform::capabilities::{
@@ -7,7 +8,7 @@ use newpic_platform::capabilities::{
 };
 use newpic_platform::capture::{
     CaptureError, CaptureFallback, CaptureProvenance, CaptureProvider, CaptureRequest,
-    CaptureSource, CapturedImage, PixelScale,
+    CaptureScaleMetadata, CaptureSource, CapturedImage,
 };
 use newpic_platform::geometry::{
     Display, DisplayId, DisplayOrientation, PhysicalRect, ScaleFactor,
@@ -22,15 +23,23 @@ pub struct FakeCaptureProvider {
     capabilities: CaptureCapabilities,
     displays: Vec<Display>,
     requests: Mutex<Vec<CaptureRequest>>,
+    capture_results: Mutex<VecDeque<Result<CapturedImage, CaptureError>>>,
+    display_results: Mutex<VecDeque<Result<Vec<Display>, CaptureError>>>,
 }
 
 impl FakeCaptureProvider {
-    pub fn new(capabilities: CaptureCapabilities, displays: Vec<Display>) -> Self {
-        Self {
+    pub fn new(
+        capabilities: CaptureCapabilities,
+        displays: Vec<Display>,
+    ) -> Result<Self, CaptureError> {
+        validate_display_ids(&displays)?;
+        Ok(Self {
             capabilities,
             displays,
             requests: Mutex::new(Vec::new()),
-        }
+            capture_results: Mutex::new(VecDeque::new()),
+            display_results: Mutex::new(VecDeque::new()),
+        })
     }
 
     pub fn recorded_requests(&self) -> Vec<CaptureRequest> {
@@ -38,6 +47,20 @@ impl FakeCaptureProvider {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    pub fn queue_capture_result(&self, result: Result<CapturedImage, CaptureError>) {
+        self.capture_results
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push_back(result);
+    }
+
+    pub fn queue_displays_result(&self, result: Result<Vec<Display>, CaptureError>) {
+        self.display_results
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push_back(result);
     }
 }
 
@@ -51,13 +74,14 @@ impl Default for FakeCaptureProvider {
                 .with_unattended_capture(CapabilityStatus::supported())
                 .with_pointer_capture(CapabilityStatus::supported()),
             vec![Display::new(
-                DisplayId::new("fake-primary"),
+                DisplayId::new("fake-primary").expect("valid fake display id"),
                 PhysicalRect::new(0, 0, 1920, 1080).expect("valid fake display bounds"),
                 ScaleFactor::new(1.0).expect("valid fake scale"),
                 true,
                 DisplayOrientation::Landscape,
             )],
         )
+        .expect("valid default fake provider")
     }
 }
 
@@ -67,6 +91,17 @@ impl CaptureProvider for FakeCaptureProvider {
     }
 
     fn displays(&self) -> Result<Vec<Display>, CaptureError> {
+        if let Some(result) = self
+            .display_results
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop_front()
+        {
+            if let Ok(displays) = &result {
+                validate_display_ids(displays)?;
+            }
+            return result;
+        }
         Ok(self.displays.clone())
     }
 
@@ -95,6 +130,15 @@ impl CaptureProvider for FakeCaptureProvider {
             }
         }
 
+        if let Some(result) = self
+            .capture_results
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop_front()
+        {
+            return result;
+        }
+
         let provenance = match request.source() {
             CaptureSource::Region(_) => CaptureProvenance::Region,
             CaptureSource::ActiveWindow => CaptureProvenance::ActiveWindow {
@@ -110,10 +154,25 @@ impl CaptureProvider for FakeCaptureProvider {
             vec![
                 255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
             ],
-            PixelScale::ONE,
+            CaptureScaleMetadata::uniform(ScaleFactor::new(1.0).expect("valid fixture scale")),
             provenance,
         )
     }
+}
+
+fn validate_display_ids(displays: &[Display]) -> Result<(), CaptureError> {
+    for (index, display) in displays.iter().enumerate() {
+        if displays[..index]
+            .iter()
+            .any(|earlier| earlier.id() == display.id())
+        {
+            return Err(CaptureError::Backend(format!(
+                "duplicate display identifier {:?}",
+                display.id()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn require_capability(

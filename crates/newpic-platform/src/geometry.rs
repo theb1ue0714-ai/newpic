@@ -4,8 +4,13 @@ use thiserror::Error;
 pub struct DisplayId(String);
 
 impl DisplayId {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+    pub fn new(value: impl Into<String>) -> Result<Self, GeometryError> {
+        let value = value.into();
+        let normalized = value.trim();
+        if normalized.is_empty() {
+            return Err(GeometryError::EmptyDisplayId);
+        }
+        Ok(Self(normalized.to_owned()))
     }
 
     pub fn as_str(&self) -> &str {
@@ -146,19 +151,24 @@ fn validate_extent(x: i32, y: i32, size: PhysicalSize) -> Result<(), GeometryErr
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ScaleFactor(f64);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScaleFactor(u32);
 
 impl ScaleFactor {
     pub fn new(value: f64) -> Result<Self, GeometryError> {
-        if !value.is_finite() || value <= 0.0 {
+        const UNITS_PER_ONE: f64 = 1_000_000.0;
+        if !value.is_finite() || value <= 0.0 || value > f64::from(u32::MAX) / UNITS_PER_ONE {
             return Err(GeometryError::InvalidScaleFactor(value));
         }
-        Ok(Self(value))
+        let normalized = (value * UNITS_PER_ONE).round() as u32;
+        if normalized == 0 {
+            return Err(GeometryError::InvalidScaleFactor(value));
+        }
+        Ok(Self(normalized))
     }
 
     pub const fn get(self) -> f64 {
-        self.0
+        self.0 as f64 / 1_000_000.0
     }
 }
 
@@ -221,18 +231,24 @@ impl Display {
         if !point.x.is_finite() || !point.y.is_finite() {
             return Err(GeometryError::NonFiniteLogicalPoint);
         }
-        let x = self.bounds.left() as f64 + point.x * self.scale_factor.get();
-        let y = self.bounds.top() as f64 + point.y * self.scale_factor.get();
-        let rounded_x = x.round();
-        let rounded_y = y.round();
-        if rounded_x < f64::from(i32::MIN)
-            || rounded_x > f64::from(i32::MAX)
-            || rounded_y < f64::from(i32::MIN)
-            || rounded_y > f64::from(i32::MAX)
+        let delta_x = (point.x * self.scale_factor.get()).round();
+        let delta_y = (point.y * self.scale_factor.get()).round();
+        if delta_x < i64::MIN as f64
+            || delta_x > i64::MAX as f64
+            || delta_y < i64::MIN as f64
+            || delta_y > i64::MAX as f64
         {
             return Err(GeometryError::CoordinateOutOfRange);
         }
-        Ok(PhysicalPoint::new(rounded_x as i32, rounded_y as i32))
+        let x = i64::from(self.bounds.origin().x)
+            .checked_add(delta_x as i64)
+            .and_then(|value| i32::try_from(value).ok())
+            .ok_or(GeometryError::CoordinateOutOfRange)?;
+        let y = i64::from(self.bounds.origin().y)
+            .checked_add(delta_y as i64)
+            .and_then(|value| i32::try_from(value).ok())
+            .ok_or(GeometryError::CoordinateOutOfRange)?;
+        Ok(PhysicalPoint::new(x, y))
     }
 }
 
@@ -243,6 +259,15 @@ pub struct SavedDisplayTopology {
     bounds: PhysicalRect,
     scale_factor: ScaleFactor,
     orientation: DisplayOrientation,
+    logical_intersection: LogicalRect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LogicalRect {
+    left: f64,
+    top: f64,
+    right: f64,
+    bottom: f64,
 }
 
 impl SavedDisplayTopology {
@@ -273,14 +298,24 @@ pub struct SavedRegion {
 
 impl SavedRegion {
     pub fn capture(rect: PhysicalRect, displays: &[Display]) -> Result<Self, GeometryError> {
+        ensure_unique_display_ids(displays)?;
         let participating_displays: Vec<_> = displays
             .iter()
-            .filter(|display| rect.intersection(display.bounds()).is_some())
-            .map(|display| SavedDisplayTopology {
-                id: display.id().clone(),
-                bounds: display.bounds(),
-                scale_factor: display.scale_factor(),
-                orientation: display.orientation(),
+            .filter_map(|display| {
+                let intersection = rect.intersection(display.bounds())?;
+                let scale = display.scale_factor().get();
+                Some(SavedDisplayTopology {
+                    id: display.id().clone(),
+                    bounds: display.bounds(),
+                    scale_factor: display.scale_factor(),
+                    orientation: display.orientation(),
+                    logical_intersection: LogicalRect {
+                        left: (intersection.left() - display.bounds().left()) as f64 / scale,
+                        top: (intersection.top() - display.bounds().top()) as f64 / scale,
+                        right: (intersection.right() - display.bounds().left()) as f64 / scale,
+                        bottom: (intersection.bottom() - display.bounds().top()) as f64 / scale,
+                    },
+                })
             })
             .collect();
         if participating_displays.is_empty() {
@@ -303,7 +338,12 @@ impl SavedRegion {
     /// Reuses unchanged topology, or translates by a common physical-origin
     /// delta. Any semantic topology change deterministically requests F7.
     pub fn revalidate(&self, current: &[Display]) -> SavedRegionDecision {
-        let mut translation: Option<(i64, i64)> = None;
+        if ensure_unique_display_ids(current).is_err() {
+            return SavedRegionDecision::FallbackToSelection(
+                SavedRegionInvalidation::DuplicateDisplayId,
+            );
+        }
+        let mut pieces = Vec::with_capacity(self.participating_displays.len());
         for saved in &self.participating_displays {
             let Some(display) = current.iter().find(|display| display.id() == saved.id()) else {
                 return SavedRegionDecision::FallbackToSelection(
@@ -315,43 +355,89 @@ impl SavedRegion {
                     SavedRegionInvalidation::OrientationChanged(saved.id.clone()),
                 );
             }
-            if display.bounds().size() != saved.bounds.size() {
-                return SavedRegionDecision::FallbackToSelection(
-                    SavedRegionInvalidation::ResolutionChanged(saved.id.clone()),
-                );
-            }
-            if display.scale_factor() != saved.scale_factor {
-                return SavedRegionDecision::FallbackToSelection(
-                    SavedRegionInvalidation::ScaleChanged(saved.id.clone()),
-                );
-            }
-            let delta = (
-                display.bounds().left() - saved.bounds.left(),
-                display.bounds().top() - saved.bounds.top(),
+            let scale = display.scale_factor().get();
+            let logical = saved.logical_intersection;
+            let coordinates = (
+                display.bounds().left() + (logical.left * scale).round() as i64,
+                display.bounds().top() + (logical.top * scale).round() as i64,
+                display.bounds().left() + (logical.right * scale).round() as i64,
+                display.bounds().top() + (logical.bottom * scale).round() as i64,
             );
-            if translation.is_some_and(|expected| expected != delta) {
+            let (Ok(left), Ok(top)) = (i32::try_from(coordinates.0), i32::try_from(coordinates.1))
+            else {
                 return SavedRegionDecision::FallbackToSelection(
-                    SavedRegionInvalidation::InconsistentDisplayMovement,
+                    SavedRegionInvalidation::TranslatedRegionOutOfRange,
+                );
+            };
+            let Ok(piece) = PhysicalRect::new(
+                left,
+                top,
+                u32::try_from(coordinates.2 - coordinates.0).unwrap_or(0),
+                u32::try_from(coordinates.3 - coordinates.1).unwrap_or(0),
+            ) else {
+                return SavedRegionDecision::FallbackToSelection(
+                    SavedRegionInvalidation::TranslatedRegionOutOfRange,
+                );
+            };
+            if piece.intersection(display.bounds()) != Some(piece) {
+                return SavedRegionDecision::FallbackToSelection(
+                    SavedRegionInvalidation::DisplayBoundsInsufficient(saved.id.clone()),
                 );
             }
-            translation = Some(delta);
+            pieces.push(piece);
         }
+        exact_rectangular_union(&pieces).map_or_else(
+            || {
+                SavedRegionDecision::FallbackToSelection(
+                    SavedRegionInvalidation::NonRectangularReconstruction,
+                )
+            },
+            SavedRegionDecision::Reuse,
+        )
+    }
+}
 
-        let (delta_x, delta_y) = translation.unwrap_or((0, 0));
-        let x = i64::from(self.rect.origin().x) + delta_x;
-        let y = i64::from(self.rect.origin().y) + delta_y;
-        let (Ok(x), Ok(y)) = (i32::try_from(x), i32::try_from(y)) else {
-            return SavedRegionDecision::FallbackToSelection(
-                SavedRegionInvalidation::TranslatedRegionOutOfRange,
-            );
-        };
-        match PhysicalRect::from_origin_size(x, y, self.rect.size()) {
-            Ok(rect) => SavedRegionDecision::Reuse(rect),
-            Err(_) => SavedRegionDecision::FallbackToSelection(
-                SavedRegionInvalidation::TranslatedRegionOutOfRange,
-            ),
+fn ensure_unique_display_ids(displays: &[Display]) -> Result<(), GeometryError> {
+    for (index, display) in displays.iter().enumerate() {
+        if displays[..index]
+            .iter()
+            .any(|earlier| earlier.id() == display.id())
+        {
+            return Err(GeometryError::DuplicateDisplayId(display.id().clone()));
         }
     }
+    Ok(())
+}
+
+fn exact_rectangular_union(pieces: &[PhysicalRect]) -> Option<PhysicalRect> {
+    pieces.first()?;
+    let left = pieces.iter().map(|piece| piece.left()).min()?;
+    let top = pieces.iter().map(|piece| piece.top()).min()?;
+    let right = pieces.iter().map(|piece| piece.right()).max()?;
+    let bottom = pieces.iter().map(|piece| piece.bottom()).max()?;
+    for (index, piece) in pieces.iter().enumerate() {
+        if pieces[..index]
+            .iter()
+            .any(|earlier| earlier.intersection(*piece).is_some())
+        {
+            return None;
+        }
+    }
+    let covered: u128 = pieces
+        .iter()
+        .map(|piece| u128::from(piece.size().width()) * u128::from(piece.size().height()))
+        .sum();
+    let bounding_area = u128::try_from(right - left).ok()? * u128::try_from(bottom - top).ok()?;
+    if covered != bounding_area {
+        return None;
+    }
+    PhysicalRect::new(
+        i32::try_from(left).ok()?,
+        i32::try_from(top).ok()?,
+        u32::try_from(right - left).ok()?,
+        u32::try_from(bottom - top).ok()?,
+    )
+    .ok()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -363,10 +449,10 @@ pub enum SavedRegionDecision {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SavedRegionInvalidation {
     DisplayRemoved(DisplayId),
-    ResolutionChanged(DisplayId),
-    ScaleChanged(DisplayId),
     OrientationChanged(DisplayId),
-    InconsistentDisplayMovement,
+    DisplayBoundsInsufficient(DisplayId),
+    DuplicateDisplayId,
+    NonRectangularReconstruction,
     TranslatedRegionOutOfRange,
 }
 
@@ -451,4 +537,8 @@ pub enum GeometryError {
     CoordinateOutOfRange,
     #[error("saved region does not intersect an attached display")]
     RegionOutsideDisplays,
+    #[error("display identifier cannot be empty")]
+    EmptyDisplayId,
+    #[error("display identifier appears more than once: {0:?}")]
+    DuplicateDisplayId(DisplayId),
 }

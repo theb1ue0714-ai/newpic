@@ -103,7 +103,8 @@ fn fake_rejects_unsupported_operations_and_unknown_display_ids() {
     let provider = FakeCaptureProvider::new(
         capabilities,
         FakeCaptureProvider::default().displays().unwrap(),
-    );
+    )
+    .unwrap();
 
     assert!(matches!(
         provider.capture(CaptureRequest::new(
@@ -117,11 +118,11 @@ fn fake_rejects_unsupported_operations_and_unknown_display_ids() {
     ));
     assert_eq!(
         provider.capture(CaptureRequest::new(
-            CaptureSource::Display(newpic_platform::geometry::DisplayId::new("missing")),
+            CaptureSource::Display(newpic_platform::geometry::DisplayId::new("missing").unwrap()),
             CaptureOptions::default(),
         )),
         Err(CaptureError::DisplayNotFound(
-            newpic_platform::geometry::DisplayId::new("missing")
+            newpic_platform::geometry::DisplayId::new("missing").unwrap()
         ))
     );
     assert!(matches!(
@@ -133,5 +134,26 @@ fn fake_rejects_unsupported_operations_and_unknown_display_ids() {
             operation: "pointer_capture",
             ..
         })
+    ));
+}
+
+#[test]
+fn fake_supports_thread_safe_scripted_capture_and_display_results() {
+    let provider = FakeCaptureProvider::default();
+    provider.queue_capture_result(Err(CaptureError::PermissionDenied {
+        settings_hint: Some("open settings".into()),
+    }));
+    provider.queue_capture_result(Err(CaptureError::UserCancelled));
+    provider.queue_displays_result(Err(CaptureError::BackendUnavailable("offline".into())));
+
+    let request = CaptureRequest::new(CaptureSource::ActiveWindow, CaptureOptions::default());
+    assert!(matches!(
+        provider.capture(request.clone()),
+        Err(CaptureError::PermissionDenied { .. })
+    ));
+    assert_eq!(provider.capture(request), Err(CaptureError::UserCancelled));
+    assert!(matches!(
+        provider.displays(),
+        Err(CaptureError::BackendUnavailable(_))
     ));
 }
