@@ -1,7 +1,11 @@
 use newpic_linux::{LinuxCaptureProvider, LinuxSession};
 use newpic_platform::{
     capabilities::{CapabilityStatus, CaptureBackend},
-    capture::{CaptureOptions, CaptureProvider, CaptureRequest, CaptureSource},
+    capture::{
+        CaptureError, CaptureOptions, CaptureProvenance, CaptureProvider, CaptureRequest,
+        CaptureSource,
+    },
+    geometry::PhysicalRect,
 };
 
 #[test]
@@ -58,18 +62,14 @@ fn wayland_rejects_specific_display_without_opening_the_portal() {
 }
 
 #[test]
-fn wayland_portal_cancellation_is_user_cancellation() {
-    assert_eq!(
-        newpic_linux::classify_portal_error("Portal request was cancelled"),
-        newpic_platform::capture::CaptureError::UserCancelled
-    );
-}
-
-#[test]
-fn wayland_portal_denial_is_permission_denied() {
+fn wayland_display_enumeration_reports_portal_owned_selection() {
+    let provider = LinuxCaptureProvider::for_session(LinuxSession::Wayland);
     assert!(matches!(
-        newpic_linux::classify_portal_error("Portal request failed: Not allowed"),
-        newpic_platform::capture::CaptureError::PermissionDenied { .. }
+        provider.displays(),
+        Err(CaptureError::PortalOwnedSelection {
+            operation: "display enumeration",
+            ..
+        })
     ));
 }
 
@@ -79,19 +79,41 @@ fn wayland_portal_denial_is_permission_denied() {
 #[ignore = "requires a real interactive X11/Wayland session and may show a portal"]
 fn interactive_provider_lists_displays_and_returns_valid_rgba() {
     let provider = LinuxCaptureProvider::detect();
-    let displays = provider
-        .displays()
-        .expect("interactive display enumeration");
-    assert!(
-        !displays.is_empty(),
-        "an interactive session must expose a display"
-    );
-    let image = provider
-        .capture(CaptureRequest::new(
-            CaptureSource::Display(displays[0].id().clone()),
-            CaptureOptions::default(),
-        ))
-        .expect("interactive display capture");
+    let image = match provider.session() {
+        LinuxSession::X11 => {
+            let displays = provider
+                .displays()
+                .expect("interactive X11 display enumeration");
+            assert!(!displays.is_empty(), "X11 must expose a display");
+            provider
+                .capture(CaptureRequest::new(
+                    CaptureSource::Display(displays[0].id().clone()),
+                    CaptureOptions::default(),
+                ))
+                .expect("interactive X11 display capture")
+        }
+        LinuxSession::Wayland => {
+            let requested = PhysicalRect::new(0, 0, 1, 1).unwrap();
+            let image = provider
+                .capture(CaptureRequest::new(
+                    CaptureSource::Region(requested),
+                    CaptureOptions::default(),
+                ))
+                .expect("interactive portal-owned area capture");
+            assert!(matches!(
+                image.provenance(),
+                CaptureProvenance::PortalOwnedSelection {
+                    requested_region,
+                    ..
+                } if *requested_region == requested
+            ));
+            assert!(image
+                .execution()
+                .and_then(|execution| execution.fallback_reason())
+                .is_some());
+            image
+        }
+    };
     assert_eq!(
         image.rgba().len(),
         image.row_stride() * image.height() as usize

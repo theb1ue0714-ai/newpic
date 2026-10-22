@@ -96,7 +96,11 @@ impl CaptureProvider for LinuxCaptureProvider {
     fn displays(&self) -> Result<Vec<newpic_platform::geometry::Display>, CaptureError> {
         match self.session {
             LinuxSession::X11 => platform::displays_x11(),
-            LinuxSession::Wayland => platform::displays_wayland(),
+            LinuxSession::Wayland => Err(CaptureError::PortalOwnedSelection {
+                operation: "display enumeration",
+                reason: "the Screenshot portal owns source selection and does not return reusable display identities"
+                    .into(),
+            }),
         }
     }
 
@@ -137,11 +141,14 @@ impl CaptureProvider for LinuxCaptureProvider {
             });
         }
         let backend = self.capabilities().backend();
+        let portal_fallback = (self.session == LinuxSession::Wayland).then_some(
+            "the compositor selected the actual area; the requested rectangle was not applied",
+        );
         match self.session {
             LinuxSession::X11 => platform::capture_x11(request),
             LinuxSession::Wayland => platform::capture_wayland(request),
         }
-        .map(|image| image.with_execution(CaptureExecution::new(backend, None::<String>)))
+        .map(|image| image.with_execution(CaptureExecution::new(backend, portal_fallback)))
     }
 }
 
@@ -165,24 +172,6 @@ pub fn classify_xcap_error(message: &str) -> CaptureError {
 
 /// Maps an XDG Desktop Portal response without falling through to a less
 /// restrictive capture mechanism after cancellation or denial.
-pub fn classify_portal_error(message: &str) -> CaptureError {
-    let normalized = message.to_ascii_lowercase();
-    if normalized.contains("cancel") {
-        CaptureError::UserCancelled
-    } else if normalized.contains("not allowed")
-        || normalized.contains("permission")
-        || normalized.contains("denied")
-    {
-        CaptureError::PermissionDenied {
-            settings_hint: Some(
-                "allow screenshots in the desktop portal or compositor settings".into(),
-            ),
-        }
-    } else {
-        CaptureError::Backend(message.to_owned())
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WindowFacts {
     pid: u32,
@@ -226,7 +215,13 @@ fn orientation_from_rotation(
 mod platform {
     use std::collections::HashSet;
 
-    use ashpd::desktop::screenshot::{AvailableTargets, Screenshot};
+    use ashpd::{
+        desktop::{
+            screenshot::{AvailableTargets, Screenshot},
+            ResponseError,
+        },
+        PortalError,
+    };
     use newpic_platform::{
         capture::{
             capture_scale_metadata_for_region, normalize_native_rgba8, CaptureError,
@@ -238,12 +233,24 @@ mod platform {
     use xcap::{Monitor, Window};
 
     use super::{
-        classify_portal_error, classify_xcap_error, orientation_from_rotation,
-        select_active_window, WindowFacts,
+        classify_xcap_error, orientation_from_rotation, select_active_window, WindowFacts,
     };
 
     fn backend_error(error: impl std::fmt::Display) -> CaptureError {
         classify_xcap_error(&error.to_string())
+    }
+
+    pub(super) fn portal_error(error: ashpd::Error) -> CaptureError {
+        match error {
+            ashpd::Error::Response(ResponseError::Cancelled)
+            | ashpd::Error::Portal(PortalError::Cancelled(_)) => CaptureError::UserCancelled,
+            ashpd::Error::Portal(PortalError::NotAllowed(_)) => CaptureError::PermissionDenied {
+                settings_hint: Some(
+                    "allow screenshots in the desktop portal or compositor settings".into(),
+                ),
+            },
+            opaque => CaptureError::Backend(opaque.to_string()),
+        }
     }
 
     fn scaled_i32(value: i32, scale: f64) -> Result<i32, CaptureError> {
@@ -306,38 +313,6 @@ mod platform {
 
     pub(super) fn displays_x11() -> Result<Vec<Display>, CaptureError> {
         native_displays().map(|items| items.into_iter().map(|(_, display)| display).collect())
-    }
-
-    pub(super) fn displays_wayland() -> Result<Vec<Display>, CaptureError> {
-        let connection = libwayshot_xcap::WayshotConnection::new().map_err(backend_error)?;
-        connection
-            .get_all_outputs()
-            .iter()
-            .enumerate()
-            .map(|(index, output)| {
-                let logical = output.logical_region.inner;
-                if logical.size.width == 0 || logical.size.height == 0 {
-                    return Err(CaptureError::Backend(
-                        "Wayland reported an empty output".into(),
-                    ));
-                }
-                let scale = f64::from(output.physical_size.width) / f64::from(logical.size.width);
-                let width = output.physical_size.width;
-                let height = output.physical_size.height;
-                Ok(Display::new(
-                    DisplayId::new(format!("wayland:{}:{}", output.name, output.description))?,
-                    PhysicalRect::new(
-                        scaled_i32(logical.position.x, scale)?,
-                        scaled_i32(logical.position.y, scale)?,
-                        width,
-                        height,
-                    )?,
-                    ScaleFactor::new(scale)?,
-                    index == 0,
-                    orientation_from_rotation(0.0, width, height),
-                ))
-            })
-            .collect()
     }
 
     fn normalized_image(
@@ -498,8 +473,8 @@ mod platform {
     }
 
     pub(super) fn capture_wayland(request: CaptureRequest) -> Result<CapturedImage, CaptureError> {
-        match request.source() {
-            CaptureSource::Region(_) => {}
+        let requested_region = match request.source() {
+            CaptureSource::Region(region) => *region,
             CaptureSource::Display(_) => {
                 return Err(CaptureError::Unsupported {
                     operation: "specific-display capture",
@@ -515,7 +490,7 @@ mod platform {
                             .into(),
                 });
             }
-        }
+        };
         let response = futures_lite::future::block_on(async {
             Screenshot::request()
                 .modal(true)
@@ -523,9 +498,9 @@ mod platform {
                 .target(AvailableTargets::Area)
                 .send()
                 .await
-                .map_err(|error| classify_portal_error(&error.to_string()))?
+                .map_err(portal_error)?
                 .response()
-                .map_err(|error| classify_portal_error(&error.to_string()))
+                .map_err(portal_error)
         })?;
         let uri = url::Url::parse(response.uri().as_str())
             .map_err(|error| CaptureError::Backend(format!("invalid portal URI: {error}")))?;
@@ -554,7 +529,11 @@ mod platform {
             row_stride,
             image.into_raw(),
             CaptureScaleMetadata::unknown(),
-            CaptureProvenance::Region,
+            CaptureProvenance::PortalOwnedSelection {
+                requested_region,
+                reason: "the compositor selected the actual area; exact returned desktop coordinates are unknown"
+                    .into(),
+            },
         )
     }
 }
@@ -567,12 +546,6 @@ mod platform {
     };
 
     pub(super) fn displays_x11() -> Result<Vec<Display>, CaptureError> {
-        Err(CaptureError::BackendUnavailable(
-            "the Linux capture provider requires a Linux target".into(),
-        ))
-    }
-
-    pub(super) fn displays_wayland() -> Result<Vec<Display>, CaptureError> {
         Err(CaptureError::BackendUnavailable(
             "the Linux capture provider requires a Linux target".into(),
         ))
@@ -640,5 +613,27 @@ mod tests {
             select_active_window(&[WindowFacts::new(9, true, true)], 99),
             None
         );
+    }
+
+    #[test]
+    fn typed_portal_cancellation_and_denial_are_preserved() {
+        assert_eq!(
+            platform::portal_error(ashpd::Error::Response(
+                ashpd::desktop::ResponseError::Cancelled,
+            )),
+            CaptureError::UserCancelled
+        );
+        assert_eq!(
+            platform::portal_error(ashpd::Error::Portal(ashpd::PortalError::Cancelled(
+                "cancelled".into(),
+            ))),
+            CaptureError::UserCancelled
+        );
+        assert!(matches!(
+            platform::portal_error(ashpd::Error::Portal(ashpd::PortalError::NotAllowed(
+                "denied".into(),
+            ))),
+            CaptureError::PermissionDenied { .. }
+        ));
     }
 }

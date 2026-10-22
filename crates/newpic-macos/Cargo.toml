@@ -9,4 +9,5 @@ newpic-platform = { path = "../newpic-platform" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit.workspace = true
+objc2-foundation.workspace = true
 screencapturekit.workspace = true

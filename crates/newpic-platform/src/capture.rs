@@ -221,12 +221,19 @@ impl CaptureRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureFallback {
     WholeWindow,
+    PortalOwnedSelection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureProvenance {
     Region,
-    ActiveWindow { fallback: Option<CaptureFallback> },
+    PortalOwnedSelection {
+        requested_region: PhysicalRect,
+        reason: String,
+    },
+    ActiveWindow {
+        fallback: Option<CaptureFallback>,
+    },
     Display(DisplayId),
 }
 
@@ -509,6 +516,11 @@ pub enum CaptureError {
     BackendUnavailable(String),
     #[error("capture backend failed: {0}")]
     Backend(String),
+    #[error("{operation} is owned by the desktop portal: {reason}")]
+    PortalOwnedSelection {
+        operation: &'static str,
+        reason: String,
+    },
     #[error(transparent)]
     InvalidGeometry(#[from] GeometryError),
     #[error("captured image dimensions must be non-zero, got {width} by {height}")]

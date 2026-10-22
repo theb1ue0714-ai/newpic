@@ -86,19 +86,30 @@ struct WindowFacts {
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn select_frontmost_window(
+fn select_active_window(
     windows: &[WindowFacts],
     frontmost_pid: u32,
     own_pid: u32,
     excluded: &[u32],
+    active_window_ids: Option<&[u32]>,
+    ordered_window_ids: &[u32],
 ) -> Option<usize> {
-    windows.iter().position(|w| {
+    let eligible = |w: &WindowFacts| {
         w.pid == frontmost_pid
             && w.on_screen
             && w.layer == 0
             && w.pid != own_pid
             && !excluded.contains(&w.window_id)
-    })
+    };
+    let exact_eligible = |window_id: &u32| {
+        windows
+            .iter()
+            .position(|window| window.window_id == *window_id && eligible(window))
+    };
+
+    active_window_ids
+        .and_then(|ids| ids.iter().find_map(exact_eligible))
+        .or_else(|| ordered_window_ids.iter().find_map(exact_eligible))
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -305,7 +316,7 @@ fn composite_first_writer_masked(
 mod platform {
     use super::{
         classify_screen_capture_error, composite_first_writer_masked, physical_display_layout,
-        select_frontmost_window, DisplayLayoutFacts, WindowFacts,
+        select_active_window, DisplayLayoutFacts, WindowFacts,
     };
     use newpic_platform::{
         capture::{
@@ -316,18 +327,61 @@ mod platform {
         geometry::{Display, DisplayId, DisplayOrientation, PhysicalRect, ScaleFactor},
     };
     use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::NSProcessInfo;
     use screencapturekit::{
         cg::CGRect,
         cm::{CMSampleBufferExt, CMSampleBufferSCExt},
         cv::CVPixelBufferLockFlags,
         prelude::*,
     };
-    use std::{collections::HashSet, sync::mpsc, time::Duration};
+    use std::{collections::HashSet, ffi::c_void, sync::mpsc, time::Duration};
 
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGMainDisplayID() -> u32;
         fn CGDisplayRotation(display: u32) -> f64;
+        fn CGWindowListCreate(option: u32, relative_to_window: u32) -> *const c_void;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFArrayGetCount(array: *const c_void) -> isize;
+        fn CFArrayGetValueAtIndex(array: *const c_void, index: isize) -> *const c_void;
+        fn CFNumberGetValue(number: *const c_void, number_type: isize, value: *mut c_void) -> bool;
+        fn CFRelease(value: *const c_void);
+    }
+
+    fn supports_scwindow_is_active() -> bool {
+        let version = NSProcessInfo::processInfo().operatingSystemVersion();
+        version.majorVersion > 13 || (version.majorVersion == 13 && version.minorVersion >= 1)
+    }
+
+    fn ordered_window_ids() -> Result<Vec<u32>, CaptureError> {
+        const ON_SCREEN_ONLY: u32 = 1 << 0;
+        const EXCLUDE_DESKTOP_ELEMENTS: u32 = 1 << 4;
+        const SINT64_TYPE: isize = 4;
+
+        let array = unsafe { CGWindowListCreate(ON_SCREEN_ONLY | EXCLUDE_DESKTOP_ELEMENTS, 0) };
+        if array.is_null() {
+            return Err(CaptureError::Backend(
+                "CoreGraphics window ordering is unavailable".into(),
+            ));
+        }
+        let count = unsafe { CFArrayGetCount(array) };
+        let mut ids = Vec::with_capacity(count.max(0) as usize);
+        for index in 0..count {
+            let number = unsafe { CFArrayGetValueAtIndex(array, index) };
+            let mut value = 0_i64;
+            if !number.is_null()
+                && unsafe { CFNumberGetValue(number, SINT64_TYPE, (&mut value as *mut i64).cast()) }
+            {
+                if let Ok(id) = u32::try_from(value) {
+                    ids.push(id);
+                }
+            }
+        }
+        unsafe { CFRelease(array) };
+        Ok(ids)
     }
 
     struct Frame {
@@ -593,10 +647,25 @@ mod platform {
                 layer: w.window_layer,
             })
             .collect();
-        let index = select_frontmost_window(&facts, frontmost_pid, std::process::id(), excluded)
-            .ok_or_else(|| {
-                CaptureError::BackendUnavailable("no eligible frontmost on-screen window".into())
-            })?;
+        let active_window_ids = supports_scwindow_is_active().then(|| {
+            snap.windows
+                .iter()
+                .filter(|window| window.is_active)
+                .map(|window| window.window_id)
+                .collect::<Vec<_>>()
+        });
+        let ordered_window_ids = ordered_window_ids()?;
+        let index = select_active_window(
+            &facts,
+            frontmost_pid,
+            std::process::id(),
+            excluded,
+            active_window_ids.as_deref(),
+            &ordered_window_ids,
+        )
+        .ok_or_else(|| {
+            CaptureError::BackendUnavailable("no eligible frontmost on-screen window".into())
+        })?;
         let selected = &snap.windows[index];
         let windows = content.windows();
         let window = windows
@@ -706,7 +775,14 @@ mod tests {
     #[test]
     fn selection_uses_frontmost_pid_and_excludes_exact_window_id() {
         assert_eq!(
-            select_frontmost_window(&[w(1, 8, true), w(2, 7, true), w(3, 7, true),], 7, 99, &[2],),
+            select_active_window(
+                &[w(1, 8, true), w(2, 7, true), w(3, 7, true)],
+                7,
+                99,
+                &[2],
+                None,
+                &[1, 2, 3],
+            ),
             Some(2)
         );
     }
@@ -716,7 +792,54 @@ mod tests {
         let mut top = w(3, 9, true);
         top.layer = 1;
         assert_eq!(
-            select_frontmost_window(&[w(1, 9, false), w(2, 8, true), top], 9, 99, &[]),
+            select_active_window(
+                &[w(1, 9, false), w(2, 8, true), top],
+                9,
+                99,
+                &[],
+                None,
+                &[1, 2, 3],
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn active_window_flag_wins_over_core_graphics_order_when_available() {
+        let windows = [w(10, 7, true), w(20, 7, true)];
+
+        assert_eq!(
+            select_active_window(&windows, 7, 99, &[], Some(&[20]), &[10, 20]),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn macos_13_0_uses_core_graphics_front_to_back_window_ids() {
+        let windows = [w(20, 7, true), w(10, 7, true)];
+
+        assert_eq!(
+            select_active_window(&windows, 7, 99, &[], None, &[10, 20]),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn ordered_selection_maps_exact_id_and_skips_ineligible_windows() {
+        let windows = [w(10, 8, true), w(20, 7, true), w(30, 7, true)];
+
+        assert_eq!(
+            select_active_window(&windows, 7, 99, &[20], None, &[10, 20, 30]),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn ordered_selection_never_falls_back_to_arbitrary_snapshot_order() {
+        let windows = [w(20, 7, true), w(10, 7, true)];
+
+        assert_eq!(
+            select_active_window(&windows, 7, 99, &[], None, &[999]),
             None
         );
     }

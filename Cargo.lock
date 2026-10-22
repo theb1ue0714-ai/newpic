@@ -2534,7 +2534,6 @@ dependencies = [
  "ashpd",
  "futures-lite",
  "image",
- "libwayshot-xcap",
  "newpic-platform",
  "url",
  "xcap",
@@ -2546,6 +2545,7 @@ version = "0.1.0"
 dependencies = [
  "newpic-platform",
  "objc2-app-kit",
+ "objc2-foundation",
  "screencapturekit",
 ]
 
