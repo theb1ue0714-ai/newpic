@@ -2,6 +2,7 @@
 
 **Status:** Approved design  
 **Date:** 2026-10-22  
+**Revised:** 2026-10-23 — persistent movable and resizable F9 region
 **Working name:** NewPic  
 **Target repository:** `/data/mysite/rea`
 
@@ -30,7 +31,7 @@ The product will be delivered in stages. Phase 1 provides reliable capture, auto
 
 - **F7 — Region capture:** display a translucent selection overlay over the virtual desktop. Dragging selects the capture rectangle. Escape cancels without writing a file or changing the stored last region.
 - **F8 — Repeat last region:** immediately capture the most recently completed region. If no valid region exists, or the saved rectangle no longer intersects an attached display, open the F7 selection overlay instead.
-- **F9 — Fixed-size region:** display an 800×600 rectangle that follows the pointer. Clicking captures it. The width and height are configurable.
+- **F9 — Reusable positioned region:** display the most recently confirmed F9 rectangle at its saved physical position and size. On first use, show an 800×600 rectangle centered on the primary display. Dragging inside the rectangle moves it; dragging any edge or corner resizes it. Pointer movement and ordinary clicks never capture. Enter captures the displayed rectangle and atomically persists its position, size, display topology, and scale metadata for the next F9 invocation and future application launches. Escape cancels without writing a file or changing the previously saved F9 rectangle.
 - **F10 — Active window:** capture the content area of the foreground window when the platform exposes it. If content-only bounds are unavailable, capture the complete window bounds and notify the user that the fallback was used.
 
 All four shortcuts are configurable. A failed or conflicting registration disables only the affected shortcut and exposes the failure in Diagnostics.
@@ -62,7 +63,7 @@ The first launch creates and activates this preset:
 - capture success notification: on
 - include pointer: off
 - automatic update checking: off
-- fixed region size: 800×600
+- initial F9 region: 800×600 centered on the primary display until the user confirms another position and size
 - shortcuts: F7, F8, F9, and F10 as defined above
 
 The user can change every value. “Reapply default preset” restores the listed values after confirmation but never deletes captured images.
@@ -75,7 +76,7 @@ The user can change every value. “Reapply default preset” restores the liste
 - **Tray controller:** creates the tray menu, opens settings, exposes each capture action, and exits the application.
 - **Hotkey manager:** validates, registers, unregisters, and reports conflicts for global shortcuts.
 - **Capture coordinator:** accepts capture commands and owns cancellation, concurrency, and result dispatch.
-- **Selection overlay:** implements free-region and fixed-size selection across the virtual desktop.
+- **Selection overlay:** implements free-region selection and the movable, eight-direction resizable F9 rectangle across the virtual desktop. It confirms F9 only on Enter and exposes an always-visible dimensions label.
 - **Capture provider:** an interface implemented separately for Windows, macOS, Linux X11, and Linux Wayland.
 - **Image pipeline:** represents a capture once and supplies encoders, storage, clipboard, and future editor consumers.
 - **Storage and naming:** resolves platform directories, parses filename tokens, reserves collision-free names, and performs atomic writes.
@@ -141,7 +142,7 @@ Wayland security intentionally prevents an application from promising identical 
 The settings window contains these sections:
 
 1. **General:** login startup, tray behavior, notifications, and language.
-2. **Capture:** pointer inclusion, fixed-region dimensions, and multi-monitor behavior.
+2. **Capture:** pointer inclusion, the saved F9 dimensions, and multi-monitor behavior. Dimensions entered in Settings update the saved F9 size while retaining a valid stored position where possible.
 3. **Save:** destination, PNG/JPEG, JPEG quality, automatic save, and clipboard output.
 4. **Filename:** `%c` sequence token, optional date/time and machine tokens, minimum sequence width, and a live preview.
 5. **Shortcuts:** per-action shortcut editing with conflict and registration status.
@@ -155,7 +156,11 @@ The visual treatment should be compact, calm, and utility-oriented. It must use 
 - Normalize negative monitor origins used by left- or above-positioned displays.
 - The overlay spans all attached displays without adding its own pixels to the captured result.
 - Revalidate stored F8 geometry after display, resolution, orientation, or scaling changes.
-- Clamp fixed-size capture to the selected display. If 800×600 does not fit, reduce the visible selection to that display and show the actual dimensions before capture.
+- Store F9 independently from F8 as a versioned physical rectangle plus the display identifiers, bounds, orientations, and scale factors needed to validate it after restart.
+- When the saved F9 topology still matches, restore the exact physical rectangle, including negative virtual-desktop origins.
+- When a saved display is removed or its resolution, orientation, or scale makes the rectangle invalid, preserve the saved size where it fits and move the rectangle inside the primary display. If the saved size cannot fit, reduce it to the primary display and show the actual dimensions before confirmation.
+- Keep F9 inside one selected display while moving or resizing it. Clamp all eight resize directions to that display and never allow zero width or height.
+- Persist the displayed F9 rectangle only after Enter is accepted. Escape, overlay creation failure, display loss during interaction, and capture cancellation retain the previously saved rectangle.
 
 ## 8. Error Handling and Recovery
 
@@ -177,6 +182,8 @@ The visual treatment should be compact, calm, and utility-oriented. It must use 
 - Contract tests run against fake `CaptureProvider`, clipboard, storage, hotkey, and autostart adapters.
 - Platform integration tests cover shortcut lifecycle, clipboard fidelity, autostart registration, PNG dimensions, and permission-state reporting.
 - UI tests cover default values, validation messages, live filename preview, diagnostics, and preset reapplication.
+- Reducer tests cover F9 movement with pointer offset, all four edges and four corners, minimum size, display-edge clamping, Enter-only confirmation, and Escape restoration.
+- Settings and coordinator tests cover atomic F9 geometry persistence, restart restoration, schema migration, F8/F9 state separation, and monitor-topology fallback.
 - CI builds and tests on Windows, macOS, and Ubuntu.
 
 ### 9.2 Manual release matrix
@@ -185,6 +192,7 @@ The visual treatment should be compact, calm, and utility-oriented. It must use 
 - macOS 13 or later on Apple Silicon and Intel.
 - Ubuntu 22.04/24.04 on X11, GNOME Wayland, and KDE Wayland where available.
 - One monitor, mixed-DPI multi-monitor, negative monitor origins, and monitor hot-plug.
+- F9 first-use resize, repeated same-position capture, move-only repetition, resize-and-replace, restart restoration, and Escape preservation.
 - Clean install, upgrade, login startup, permissions denied then granted, and uninstall with captures retained.
 
 ### 9.3 Phase 1 acceptance criteria
