@@ -12,6 +12,23 @@ crate-type = ["lib", "cdylib", "staticlib"]
 tauri-build.workspace = true
 
 [dependencies]
-tauri.workspace = true
+chrono.workspace = true
+gethostname.workspace = true
 newpic-core = { path = "../../../crates/newpic-core" }
 newpic-platform = { path = "../../../crates/newpic-platform", features = ["arboard"] }
+serde.workspace = true
+tauri.workspace = true
+tauri-plugin-autostart.workspace = true
+tauri-plugin-global-shortcut.workspace = true
+tauri-plugin-notification.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+newpic-linux = { path = "../../../crates/newpic-linux" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+newpic-windows = { path = "../../../crates/newpic-windows" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+newpic-macos = { path = "../../../crates/newpic-macos" }
