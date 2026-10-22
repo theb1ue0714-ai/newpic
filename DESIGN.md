@@ -1,7 +1,20 @@
 ---
 version: alpha
 name: Raycast-design-analysis
-属于: A dark-canvas developer-tools system that treats the marketing page like an extended product screenshot — pure-near-black background, command-palette mockups as the hero, Inter typography with the ss03 stylistic set turned on, and a single white CTA pill that doesn't break the inky atmosphere. The chrome reads like Raycast's own command-palette UI scaled up to a marketing page: monochrome dark surfaces with a faint surface ladder (#07080a → #0d0d0d → #101111), tight 6–10px radius on cards, hairline 1px borders in #242728, and rare splashes of saturated accent (Hacker News yellow, Slack red, Mac green, info blue) reserved for product-tile category illustrations. The signature visual moment is a red gradient hero wordmark — three diagonal red stripes laid across the very top of the home page like a launch-banner — paired with full-bleed product UI screenshots that show Raycast's actual command palette, store, and AI chat surfaces.
+属于: >-
+  A dark-canvas developer-tools system that treats the marketing page like an
+  extended product screenshot — pure-near-black background, command-palette
+  mockups as the hero, Inter typography with the ss03 stylistic set turned on,
+  and a single white CTA pill that doesn't break the inky atmosphere. The
+  chrome reads like Raycast's own command-palette UI scaled up to a marketing
+  page: monochrome dark surfaces with a faint surface ladder (#07080a →
+  #0d0d0d → #101111), tight 6–10px radius on cards, hairline 1px borders in
+  #242728, and rare splashes of saturated accent (Hacker News yellow, Slack
+  red, Mac green, info blue) reserved for product-tile category illustrations.
+  The signature visual moment is a red gradient hero wordmark — three diagonal
+  red stripes laid across the very top of the home page like a launch-banner —
+  paired with full-bleed product UI screenshots that show Raycast's actual
+  command palette, store, and AI chat surfaces.
 description: |
   Raycast's marketing system reads like an extended product screenshot. The chrome IS the in-product chrome at marketing scale: pure-near-black canvas, hairline 1px borders, command-palette-style cards, Inter typography with the ss03 stylistic set enabled site-wide, white CTA pill, and a small set of saturated category accent colors (yellow / red / green / blue) reserved for extension and feature illustrations. Section rhythm is generous (~96px) but the page never breaks tonal continuity — the whole site sits in one continuous dark mode.
 
@@ -678,11 +691,19 @@ This file starts with the actual Raycast design analysis from
 [VoltAgent/awesome-design-md](https://github.com/VoltAgent/awesome-design-md/blob/main/design-md/raycast/DESIGN.md),
 retrieved on 2026-10-22 at source SHA-256
 `6e2c5137e4d914b70996d589688374a801b6f29a35c9c019c22abb5e0170bda3`.
-That source is provided under the **MIT License** (Copyright (c) 2026
-VoltAgent). The rules below are original NewPic adaptations and override the
-Raycast marketing guidance wherever the two conflict. Raycast branding,
-screenshots, wordmarks, icons, and product-specific layouts are not NewPic
-assets and must not be copied.
+That hash identifies the unmodified upstream source. For YAML compatibility,
+the local copy makes one minimal source normalization: the upstream plain
+`属于` scalar is represented as a folded block scalar (`>-`) because its text
+contains a colon followed by a space. This YAML compatibility adaptation
+preserves the scalar wording and meaning while changing its byte layout. No
+other upstream content before this section is intentionally changed.
+
+The upstream source is provided under the **MIT License** (Copyright (c) 2026
+VoltAgent); the complete permission notice is retained in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). The rules below are
+original NewPic adaptations and override the Raycast marketing guidance
+wherever the two conflict. Raycast branding, screenshots, wordmarks, icons,
+and product-specific layouts are not NewPic assets and must not be copied.
 
 ## Product Context
 

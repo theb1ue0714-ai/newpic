@@ -34,7 +34,9 @@ foundation tasks. Development and packaging will require:
 
 - Git
 - a current stable Rust toolchain with Cargo
-- Node.js 20 or newer and pnpm
+- a Node.js 24.15-compatible pinned toolchain and npm 11
+- npm workspaces with the committed `package-lock.json`; install with
+  `npm install`
 - Tauri 2 platform prerequisites for the host operating system
 - Windows SDK and WebView2 tooling for Windows packages
 - Xcode command-line tools for macOS packages
@@ -63,4 +65,6 @@ clipboard contents.
 
 Original NewPic code and documentation are licensed under the [MIT License](LICENSE).
 Third-party tools, dependencies, and reference materials retain their own
-licenses and notices. NewPic is not affiliated with PicPick or Raycast.
+licenses and notices; incorporated notices are listed in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). NewPic is not affiliated
+with PicPick or Raycast.

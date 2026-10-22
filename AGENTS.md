@@ -8,17 +8,21 @@ more specific nested `AGENTS.md` explicitly overrides them.
 Before changing code, tests, UI, documentation, build tooling, or research
 notes, read and follow:
 
-1. `/home/mint/AGENT.md` for the global frontend and external-reference rules.
-2. The root [`DESIGN.md`](DESIGN.md) for NewPic visual and accessibility rules.
-3. The approved product specification at
+1. Current system, developer, user, and repository instructions, including
+   `/home/mint/AGENT.md` for global frontend and external-reference rules and
+   any more-specific nested `AGENTS.md` that applies to the changed file.
+2. The approved product specification at
    [`docs/superpowers/specs/2026-10-22-newpic-design.md`](docs/superpowers/specs/2026-10-22-newpic-design.md).
-4. The approved implementation plan at
+3. The approved implementation plan at
    [`docs/plans/2026-10-22-newpic-mvp-implementation.md`](docs/plans/2026-10-22-newpic-mvp-implementation.md).
-5. The clean-room policy at
+4. The clean-room policy at
    [`docs/architecture/clean-room-policy.md`](docs/architecture/clean-room-policy.md).
+5. The derived visual and accessibility guidance in the root
+   [`DESIGN.md`](DESIGN.md).
 
-Resolve conflicts in that order after system and user instructions. Do not
-expand Phase 1 scope without an approved specification update.
+Resolve conflicts in that order. The derived visual reference cannot override
+the approved product specification or clean-room restrictions. Do not expand
+Phase 1 scope without an approved specification update.
 
 ## Engineering workflow
 
