@@ -1,0 +1,11 @@
+import { deflateSync } from "node:zlib";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+const root=resolve(dirname(fileURLToPath(import.meta.url)),".."),output=resolve(root,"apps/newpic/src-tauri/icons");mkdirSync(output,{recursive:true});
+function crc32(b){let c=0xffffffff;for(const x of b){c^=x;for(let i=0;i<8;i++)c=(c>>>1)^(0xedb88320&-(c&1));}return(c^0xffffffff)>>>0}
+function chunk(n,d){const t=Buffer.from(n),l=Buffer.alloc(4),c=Buffer.alloc(4);l.writeUInt32BE(d.length);c.writeUInt32BE(crc32(Buffer.concat([t,d])));return Buffer.concat([l,t,d,c])}
+function png(s){const rows=[];for(let y=0;y<s;y++){const r=Buffer.alloc(1+s*4);for(let x=0;x<s;x++){const e=Math.min(x,y,s-1-x,s-1-y),m=(x>s*.22&&x<s*.31&&y>s*.24&&y<s*.76)||(x>s*.31&&x<s*.48&&Math.abs(y-(s*.24+(x-s*.31)*1.45))<s*.055)||(x>s*.54&&x<s*.63&&y>s*.24&&y<s*.76)||(x>s*.63&&x<s*.78&&(Math.abs(y-s*.27)<s*.055||Math.abs(y-s*.49)<s*.055||x>s*.73&&y<s*.5)),i=1+x*4;r.set([...(m?[255,255,255]:e<s*.045?[18,85,183]:[23,105,224]),255],i)}rows.push(r)}const h=Buffer.alloc(13);h.writeUInt32BE(s,0);h.writeUInt32BE(s,4);h.set([8,6,0,0,0],8);return Buffer.concat([Buffer.from("89504e470d0a1a0a","hex"),chunk("IHDR",h),chunk("IDAT",deflateSync(Buffer.concat(rows),{level:9})),chunk("IEND",Buffer.alloc(0))])}
+const images=[32,128,256,512].map(size=>({size,data:png(size)}));writeFileSync(resolve(output,"icon.png"),images.at(-1).data);
+const ih=Buffer.alloc(6);ih.writeUInt16LE(1,2);ih.writeUInt16LE(images.length,4);let off=6+images.length*16;const entries=images.map(({size,data})=>{const e=Buffer.alloc(16);e[0]=size>=256?0:size;e[1]=size>=256?0:size;e.writeUInt16LE(1,4);e.writeUInt16LE(32,6);e.writeUInt32LE(data.length,8);e.writeUInt32LE(off,12);off+=data.length;return e});writeFileSync(resolve(output,"icon.ico"),Buffer.concat([ih,...entries,...images.map(x=>x.data)]));
+const types=["icp5","ic07","ic08","ic09"],parts=images.map(({data},i)=>{const h=Buffer.alloc(8);h.write(types[i]);h.writeUInt32BE(data.length+8,4);return Buffer.concat([h,data])}),head=Buffer.alloc(8);head.write("icns");head.writeUInt32BE(8+parts.reduce((n,p)=>n+p.length,0),4);writeFileSync(resolve(output,"icon.icns"),Buffer.concat([head,...parts]));

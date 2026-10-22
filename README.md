@@ -23,14 +23,15 @@ screen tools are intentionally deferred to later, separately approved phases.
 
 ## Status
 
-**Phase 0 / foundation in progress.** Repository rules, clean-room boundaries,
-the visual design system, and the REA analysis environment are being
-established before application scaffolding and Phase 1 implementation.
+**Phase 1 release candidate; acceptance evidence pending.**
+The capture pipeline, overlays, settings UI, diagnostics, tray, shortcuts, and
+login startup are implemented. Automated local gates run on Linux; Windows and
+macOS verification awaits successful CI runs. Interactive desktop evidence and public
+Windows/macOS signing remain release blockers.
 
 ## Build prerequisites
 
-The application workspace is added by the implementation plan after the
-foundation tasks. Development and packaging will require:
+Development and packaging require:
 
 - Git
 - a current stable Rust toolchain with Cargo
@@ -46,6 +47,26 @@ Platform signing and notarization credentials are required only for public
 distribution and must never be committed. See the implementation plan for the
 exact commands as each workspace component is introduced.
 
+## Verification
+
+Run the complete local gate from the repository root:
+
+```bash
+npm run prepare-icons --workspace=@newpic/desktop
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+npm test -- --run
+npm run typecheck
+npm run build --workspace=@newpic/desktop
+bash scripts/check-repo-contract.sh
+bash scripts/verify-default-preset.sh
+```
+
+GitHub CI repeats the checks on current Ubuntu, Windows, and macOS runners.
+The installer workflow produces clearly labeled unsigned development bundles
+only on manual dispatch or `v*` tags.
+
 ## Privacy
 
 Phase 1 has no telemetry. Screenshots and clipboard data remain local unless a
@@ -60,6 +81,10 @@ clipboard contents.
 - [Visual design system](DESIGN.md)
 - [Clean-room policy](docs/architecture/clean-room-policy.md)
 - [REA environment baseline](research/rea/environment-baseline.md)
+- [Manual release matrix](docs/testing/manual-release-matrix.md)
+- [Linux smoke test](docs/testing/linux-smoke-test.md)
+- [Signing and notarization](docs/release/signing.md)
+- [Known platform limitations](docs/release/known-platform-limitations.md)
 
 ## License
 

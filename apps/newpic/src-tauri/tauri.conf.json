@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://127.0.0.1:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run prepare-icons && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -24,7 +24,11 @@
     }
   },
   "bundle": {
-    "active": false,
-    "icon": []
+    "active": true,
+    "targets": "all",
+    "category": "Utility",
+    "shortDescription": "Private, local-first screen capture utility",
+    "longDescription": "NewPic captures regions and active windows, saves locally, and copies images to the clipboard.",
+    "icon": ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"]
   }
 }

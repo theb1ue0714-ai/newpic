@@ -15,6 +15,7 @@ yarn-error.log*
 
 # Rust and Tauri output
 target/
+apps/newpic/src-tauri/icons/
 **/target/
 **/src-tauri/gen/
 *.msi

@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "prepare-icons": "node ../../scripts/generate-bundle-icons.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri"

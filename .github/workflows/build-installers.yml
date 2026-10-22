@@ -1,0 +1,57 @@
+name: Unsigned development installers
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }} unsigned development build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-24.04
+            bundles: deb,appimage
+            artifacts: target/release/bundle/{deb,appimage}/**/*
+          - name: Windows
+            os: windows-2025
+            bundles: msi,nsis
+            artifacts: target/release/bundle/{msi,nsis}/**/*
+          - name: macOS
+            os: macos-15
+            bundles: app,dmg
+            artifacts: target/release/bundle/{macos,dmg}/**/*
+          - name: macOS-Intel
+            os: macos-15-intel
+            bundles: app,dmg
+            artifacts: target/release/bundle/{macos,dmg}/**/*
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install Linux prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.15.0
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - name: Build unsigned development bundles
+        run: npm run tauri --workspace=@newpic/desktop -- build --bundles ${{ matrix.bundles }} --ci --no-sign
+      - name: Upload unsigned development artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: NewPic-${{ matrix.name }}-unsigned-development
+          path: ${{ matrix.artifacts }}
+          if-no-files-found: error
+          retention-days: 14
