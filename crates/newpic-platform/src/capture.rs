@@ -221,7 +221,6 @@ impl CaptureRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureFallback {
     WholeWindow,
-    PortalOwnedSelection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

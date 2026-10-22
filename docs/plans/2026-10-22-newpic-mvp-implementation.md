@@ -435,7 +435,7 @@ git commit -m "feat: define capture contracts and monitor geometry"
 
 **Step 1: Write platform contract tests**
 
-Each native test must assert that the adapter returns at least one display in an interactive session, produces valid RGBA dimensions, and reports its backend and limitations. Mark interactive capture tests ignored by default with a documented command to opt in; keep pure conversion tests always enabled.
+Each Windows, macOS, and Linux X11 interactive test must assert that the adapter returns at least one reusable display identity, produces valid RGBA dimensions, and reports its backend and limitations. Wayland is different by design: the XDG Screenshot portal owns source selection, so `displays()` may return the typed `PortalOwnedSelection` result instead of fabricating reusable display identities. Its ignored interactive test must request a portal-owned region, validate the returned RGBA image, and verify portal-owned provenance. Mark all interactive capture tests ignored by default with a documented command to opt in; keep pure conversion and capability tests always enabled.
 
 **Step 2: Run the local failing test**
 
@@ -449,7 +449,7 @@ Expected: FAIL because the Linux adapter is still empty.
 
 - Windows enables `xcap`'s WGC feature where supported and reports fallback use.
 - macOS maps ScreenCaptureKit permission errors to `PermissionDenied` with a settings deep-link hint.
-- Linux reports X11 or Wayland from the active session; Wayland cancellation is a user cancellation, not an application error.
+- Linux reports X11 or Wayland from the active session; Wayland cancellation is a user cancellation, not an application error. Wayland must not claim exact repeat-region or specific-display support when the portal does not return reusable geometry or display identity.
 - All adapters convert pixels through one reviewed BGRA/RGBA conversion helper and never expose `xcap` types outside the adapter crate.
 
 Active-window lookup must choose an explicitly focused, non-minimized window and reject NewPic's own overlay/settings windows. If the backend cannot distinguish content bounds, return complete window bounds plus `CaptureFallback::WholeWindow`.
