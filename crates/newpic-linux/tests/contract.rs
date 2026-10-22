@@ -31,6 +31,30 @@ fn wayland_capabilities_report_runtime_backend_consent_and_active_window_limit()
         capabilities.active_window_capture(),
         CapabilityStatus::Unsupported { .. }
     ));
+    assert!(matches!(
+        capabilities.display_capture(),
+        CapabilityStatus::Unsupported { .. }
+    ));
+    assert!(matches!(
+        capabilities.pointer_capture(),
+        CapabilityStatus::Limited { .. }
+    ));
+}
+
+#[test]
+fn wayland_rejects_specific_display_without_opening_the_portal() {
+    let provider = LinuxCaptureProvider::for_session(LinuxSession::Wayland);
+    let request = CaptureRequest::new(
+        CaptureSource::Display(newpic_platform::geometry::DisplayId::new("display").unwrap()),
+        CaptureOptions::default(),
+    );
+    assert!(matches!(
+        provider.capture(request),
+        Err(newpic_platform::capture::CaptureError::Unsupported {
+            operation: "specific-display capture",
+            ..
+        })
+    ));
 }
 
 #[test]

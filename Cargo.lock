@@ -2545,6 +2545,7 @@ name = "newpic-macos"
 version = "0.1.0"
 dependencies = [
  "newpic-platform",
+ "objc2-app-kit",
  "screencapturekit",
 ]
 

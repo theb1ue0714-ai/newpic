@@ -1,5 +1,7 @@
 //! macOS ScreenCaptureKit screenshot adapter.
 
+#[cfg(any(target_os = "macos", test))]
+use newpic_platform::geometry::PhysicalRect;
 use newpic_platform::{
     capabilities::{CapabilityStatus, CaptureBackend, CaptureCapabilities},
     capture::{CaptureError, CaptureExecution, CaptureProvider, CaptureRequest, CapturedImage},
@@ -26,7 +28,10 @@ impl MacOsCaptureProvider {
 impl CaptureProvider for MacOsCaptureProvider {
     fn capabilities(&self) -> CaptureCapabilities {
         CaptureCapabilities::new(CaptureBackend::MacOsScreenCaptureKit)
-            .with_region_capture(CapabilityStatus::supported())
+            .with_region_capture(CapabilityStatus::limited(
+                "cross-display capture rejects ambiguous, non-edge-aligned mixed-scale layouts",
+                None::<String>,
+            ))
             .with_active_window_capture(CapabilityStatus::limited(
                 "ScreenCaptureKit returns the complete independent window, not content-only bounds",
                 None::<String>,
@@ -76,15 +81,19 @@ pub fn classify_screen_capture_error(message: &str) -> CaptureError {
 struct WindowFacts {
     window_id: u32,
     pid: u32,
-    active: bool,
     on_screen: bool,
     layer: i32,
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn select_active_window(windows: &[WindowFacts], own_pid: u32, excluded: &[u32]) -> Option<usize> {
+fn select_frontmost_window(
+    windows: &[WindowFacts],
+    frontmost_pid: u32,
+    own_pid: u32,
+    excluded: &[u32],
+) -> Option<usize> {
     windows.iter().position(|w| {
-        w.active
+        w.pid == frontmost_pid
             && w.on_screen
             && w.layer == 0
             && w.pid != own_pid
@@ -92,9 +101,212 @@ fn select_active_window(windows: &[WindowFacts], own_pid: u32, excluded: &[u32])
     })
 }
 
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, Copy)]
+struct DisplayLayoutFacts {
+    id: u32,
+    logical_x: f64,
+    logical_y: f64,
+    logical_width: f64,
+    logical_height: f64,
+    pixel_width: u32,
+    pixel_height: u32,
+    primary: bool,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn physical_display_layout(
+    facts: &[DisplayLayoutFacts],
+) -> Result<Vec<PhysicalRect>, CaptureError> {
+    const EPSILON: f64 = 0.01;
+    fn near(a: f64, b: f64) -> bool {
+        (a - b).abs() <= EPSILON
+    }
+    if facts.is_empty() || facts.iter().filter(|d| d.primary).count() != 1 {
+        return Err(CaptureError::Backend(
+            "macOS display topology requires exactly one primary display".into(),
+        ));
+    }
+    for fact in facts {
+        if !fact.logical_x.is_finite()
+            || !fact.logical_y.is_finite()
+            || !fact.logical_width.is_finite()
+            || !fact.logical_height.is_finite()
+            || fact.logical_width <= 0.0
+            || fact.logical_height <= 0.0
+            || fact.pixel_width == 0
+            || fact.pixel_height == 0
+        {
+            return Err(CaptureError::Backend(
+                "invalid macOS display geometry".into(),
+            ));
+        }
+    }
+    let primary = facts.iter().position(|d| d.primary).unwrap();
+    let mut origins = vec![None; facts.len()];
+    origins[primary] = Some((0_i32, 0_i32));
+    while origins.iter().any(Option::is_none) {
+        let mut progress = false;
+        for index in 0..facts.len() {
+            if origins[index].is_some() {
+                continue;
+            }
+            let current = facts[index];
+            let mut x = None;
+            let mut y = None;
+            for (other_index, origin) in origins.iter().enumerate() {
+                let Some((other_x, other_y)) = origin else {
+                    continue;
+                };
+                let other = facts[other_index];
+                let current_scale = f64::from(current.pixel_width) / current.logical_width;
+                let other_scale = f64::from(other.pixel_width) / other.logical_width;
+                let same_scale = near(current_scale, other_scale);
+                let x_candidate = if same_scale {
+                    Some(
+                        i64::from(*other_x)
+                            + ((current.logical_x - other.logical_x) * current_scale).round()
+                                as i64,
+                    )
+                } else if near(current.logical_x, other.logical_x) {
+                    Some(i64::from(*other_x))
+                } else if near(
+                    current.logical_x + current.logical_width,
+                    other.logical_x + other.logical_width,
+                ) {
+                    Some(
+                        i64::from(*other_x) + i64::from(other.pixel_width)
+                            - i64::from(current.pixel_width),
+                    )
+                } else if near(current.logical_x, other.logical_x + other.logical_width) {
+                    Some(i64::from(*other_x) + i64::from(other.pixel_width))
+                } else if near(current.logical_x + current.logical_width, other.logical_x) {
+                    Some(i64::from(*other_x) - i64::from(current.pixel_width))
+                } else {
+                    None
+                };
+                let y_candidate = if same_scale {
+                    Some(
+                        i64::from(*other_y)
+                            + ((current.logical_y - other.logical_y) * current_scale).round()
+                                as i64,
+                    )
+                } else if near(current.logical_y, other.logical_y) {
+                    Some(i64::from(*other_y))
+                } else if near(
+                    current.logical_y + current.logical_height,
+                    other.logical_y + other.logical_height,
+                ) {
+                    Some(
+                        i64::from(*other_y) + i64::from(other.pixel_height)
+                            - i64::from(current.pixel_height),
+                    )
+                } else if near(current.logical_y, other.logical_y + other.logical_height) {
+                    Some(i64::from(*other_y) + i64::from(other.pixel_height))
+                } else if near(current.logical_y + current.logical_height, other.logical_y) {
+                    Some(i64::from(*other_y) - i64::from(current.pixel_height))
+                } else {
+                    None
+                };
+                if let Some(candidate) = x_candidate {
+                    if x.is_some_and(|known| known != candidate) {
+                        return Err(CaptureError::Backend(
+                            "ambiguous macOS display X topology".into(),
+                        ));
+                    }
+                    x = Some(candidate);
+                }
+                if let Some(candidate) = y_candidate {
+                    if y.is_some_and(|known| known != candidate) {
+                        return Err(CaptureError::Backend(
+                            "ambiguous macOS display Y topology".into(),
+                        ));
+                    }
+                    y = Some(candidate);
+                }
+            }
+            if let (Some(x), Some(y)) = (x, y) {
+                origins[index] = Some((
+                    i32::try_from(x).map_err(|_| CaptureError::ImageLayoutOverflow)?,
+                    i32::try_from(y).map_err(|_| CaptureError::ImageLayoutOverflow)?,
+                ));
+                progress = true;
+            }
+        }
+        if !progress {
+            return Err(CaptureError::Backend(
+                "ambiguous cross-display macOS physical topology".into(),
+            ));
+        }
+    }
+    facts
+        .iter()
+        .zip(origins)
+        .map(|(fact, origin)| {
+            let _ = fact.id;
+            let (x, y) = origin.expect("layout assigned above");
+            PhysicalRect::new(x, y, fact.pixel_width, fact.pixel_height).map_err(Into::into)
+        })
+        .collect()
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[allow(clippy::too_many_arguments)]
+fn composite_first_writer_masked(
+    output: &mut [u8],
+    written: &mut [bool],
+    output_width: u32,
+    output_height: u32,
+    dx: usize,
+    dy: usize,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+) -> Result<(), CaptureError> {
+    let output_pixels = usize::try_from(output_width)
+        .ok()
+        .and_then(|w| w.checked_mul(output_height as usize))
+        .ok_or(CaptureError::ImageLayoutOverflow)?;
+    let source_pixels = usize::try_from(width)
+        .ok()
+        .and_then(|w| w.checked_mul(height as usize))
+        .ok_or(CaptureError::ImageLayoutOverflow)?;
+    if written.len() != output_pixels
+        || output.len()
+            != output_pixels
+                .checked_mul(4)
+                .ok_or(CaptureError::ImageLayoutOverflow)?
+        || pixels.len()
+            != source_pixels
+                .checked_mul(4)
+                .ok_or(CaptureError::ImageLayoutOverflow)?
+        || dx + width as usize > output_width as usize
+        || dy + height as usize > output_height as usize
+    {
+        return Err(CaptureError::Backend(
+            "invalid macOS compositor layout".into(),
+        ));
+    }
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let source = (y * width as usize + x) * 4;
+            let destination_pixel = (dy + y) * output_width as usize + dx + x;
+            if !written[destination_pixel] {
+                let destination = destination_pixel * 4;
+                output[destination..destination + 4].copy_from_slice(&pixels[source..source + 4]);
+                written[destination_pixel] = true;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 mod platform {
-    use super::{classify_screen_capture_error, select_active_window, WindowFacts};
+    use super::{
+        classify_screen_capture_error, composite_first_writer_masked, physical_display_layout,
+        select_frontmost_window, DisplayLayoutFacts, WindowFacts,
+    };
     use newpic_platform::{
         capture::{
             capture_scale_metadata_for_region, normalize_native_rgba8, CaptureError,
@@ -103,6 +315,7 @@ mod platform {
         },
         geometry::{Display, DisplayId, DisplayOrientation, PhysicalRect, ScaleFactor},
     };
+    use objc2_app_kit::NSWorkspace;
     use screencapturekit::{
         cg::CGRect,
         cm::{CMSampleBufferExt, CMSampleBufferSCExt},
@@ -131,16 +344,6 @@ mod platform {
             .checked_mul(4)
             .ok_or(CaptureError::ImageLayoutOverflow)
     }
-    fn i32_coord(v: f64) -> Result<i32, CaptureError> {
-        let v = v.round();
-        if !v.is_finite() || v < i32::MIN as f64 || v > i32::MAX as f64 {
-            Err(CaptureError::Backend(
-                "display coordinate is out of range".into(),
-            ))
-        } else {
-            Ok(v as i32)
-        }
-    }
     fn orientation(id: u32, width: u32, height: u32) -> DisplayOrientation {
         match (unsafe { CGDisplayRotation(id) }).round().rem_euclid(360.0) as u16 {
             90 => DisplayOrientation::Portrait,
@@ -149,34 +352,6 @@ mod platform {
             _ if height > width => DisplayOrientation::Portrait,
             _ => DisplayOrientation::Landscape,
         }
-    }
-    fn display(native: &SCDisplay) -> Result<Display, CaptureError> {
-        let frame = native.frame();
-        if frame.size.width <= 0.0 || frame.size.height <= 0.0 {
-            return Err(CaptureError::Backend(
-                "ScreenCaptureKit returned an empty display".into(),
-            ));
-        }
-        let (width, height) = (native.width(), native.height());
-        let sx = width as f64 / frame.size.width;
-        let sy = height as f64 / frame.size.height;
-        if (sx - sy).abs() > 0.01 {
-            return Err(CaptureError::Backend("inconsistent display scale".into()));
-        }
-        let scale = ScaleFactor::new((sx + sy) / 2.0)?;
-        let id = native.display_id();
-        Ok(Display::new(
-            DisplayId::new(format!("macos:{id}"))?,
-            PhysicalRect::new(
-                i32_coord(frame.origin.x * scale.get())?,
-                i32_coord(frame.origin.y * scale.get())?,
-                width,
-                height,
-            )?,
-            scale,
-            id == unsafe { CGMainDisplayID() },
-            orientation(id, width, height),
-        ))
     }
     fn content() -> Result<SCShareableContent, CaptureError> {
         SCShareableContent::create()
@@ -187,15 +362,54 @@ mod platform {
     }
     fn native_displays() -> Result<Vec<(SCDisplay, Display)>, CaptureError> {
         let mut ids = HashSet::new();
-        content()?
-            .displays()
+        let natives = content()?.displays();
+        let main = unsafe { CGMainDisplayID() };
+        let facts: Vec<_> = natives
+            .iter()
+            .map(|native| {
+                let frame = native.frame();
+                if frame.size.width <= 0.0 || frame.size.height <= 0.0 {
+                    return Err(CaptureError::Backend(
+                        "ScreenCaptureKit returned an empty display".into(),
+                    ));
+                }
+                Ok(DisplayLayoutFacts {
+                    id: native.display_id(),
+                    logical_x: frame.origin.x,
+                    logical_y: frame.origin.y,
+                    logical_width: frame.size.width,
+                    logical_height: frame.size.height,
+                    pixel_width: native.width(),
+                    pixel_height: native.height(),
+                    primary: native.display_id() == main,
+                })
+            })
+            .collect::<Result<_, CaptureError>>()?;
+        let bounds = physical_display_layout(&facts)?;
+        natives
             .into_iter()
-            .map(|n| {
-                let d = display(&n)?;
-                if !ids.insert(d.id().clone()) {
+            .zip(facts)
+            .zip(bounds)
+            .map(|((native, fact), bounds)| {
+                let sx = fact.pixel_width as f64 / fact.logical_width;
+                let sy = fact.pixel_height as f64 / fact.logical_height;
+                if (sx - sy).abs() > 0.01 {
+                    return Err(CaptureError::Backend("inconsistent display scale".into()));
+                }
+                let id = DisplayId::new(format!("macos:{}", fact.id))?;
+                if !ids.insert(id.clone()) {
                     return Err(CaptureError::Backend("duplicate display ID".into()));
                 }
-                Ok((n, d))
+                Ok((
+                    native,
+                    Display::new(
+                        id,
+                        bounds,
+                        ScaleFactor::new((sx + sy) / 2.0)?,
+                        fact.primary,
+                        orientation(fact.id, fact.pixel_width, fact.pixel_height),
+                    ),
+                ))
             })
             .collect()
     }
@@ -307,6 +521,7 @@ mod platform {
                 .checked_mul(height as usize)
                 .ok_or(CaptureError::ImageLayoutOverflow)?
         ];
+        let mut written = vec![false; width as usize * height as usize];
         for (native, d) in &items {
             let Some(piece) = region.intersection(d.bounds()) else {
                 continue;
@@ -330,12 +545,17 @@ mod platform {
             }
             let dx = (piece.left() - region.left()) as usize;
             let dy = (piece.top() - region.top()) as usize;
-            let src_stride = stride(w)?;
-            for y in 0..h as usize {
-                let src = y * src_stride;
-                let dst = (dy + y) * row_stride + dx * 4;
-                output[dst..dst + src_stride].copy_from_slice(&pixels[src..src + src_stride]);
-            }
+            composite_first_writer_masked(
+                &mut output,
+                &mut written,
+                width,
+                height,
+                dx,
+                dy,
+                w,
+                h,
+                &pixels,
+            )?;
         }
         CapturedImage::new(
             width,
@@ -348,6 +568,12 @@ mod platform {
     }
     fn active_capture(excluded: &[u32], cursor: bool) -> Result<CapturedImage, CaptureError> {
         let content = content()?;
+        let frontmost_pid = NSWorkspace::sharedWorkspace()
+            .frontmostApplication()
+            .map(|app| app.processIdentifier())
+            .filter(|pid| *pid > 0)
+            .map(|pid| pid as u32)
+            .ok_or_else(|| CaptureError::BackendUnavailable("no frontmost application".into()))?;
         let snap = content
             .snapshot()
             .ok_or_else(|| CaptureError::Backend("shareable content snapshot failed".into()))?;
@@ -363,14 +589,13 @@ mod platform {
                     .owning_app_index
                     .and_then(|i| snap.applications.get(i))
                     .map_or(0, |a| a.process_id.max(0) as u32),
-                active: w.is_active,
                 on_screen: w.is_on_screen,
                 layer: w.window_layer,
             })
             .collect();
-        let index =
-            select_active_window(&facts, std::process::id(), excluded).ok_or_else(|| {
-                CaptureError::BackendUnavailable("no eligible active on-screen window".into())
+        let index = select_frontmost_window(&facts, frontmost_pid, std::process::id(), excluded)
+            .ok_or_else(|| {
+                CaptureError::BackendUnavailable("no eligible frontmost on-screen window".into())
             })?;
         let selected = &snap.windows[index];
         let windows = content.windows();
@@ -446,38 +671,145 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn w(id: u32, pid: u32, active: bool, on_screen: bool) -> WindowFacts {
+    fn w(id: u32, pid: u32, on_screen: bool) -> WindowFacts {
         WindowFacts {
             window_id: id,
             pid,
-            active,
             on_screen,
             layer: 0,
         }
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn display(
+        id: u32,
+        x: f64,
+        y: f64,
+        logical_width: f64,
+        logical_height: f64,
+        pixel_width: u32,
+        pixel_height: u32,
+        primary: bool,
+    ) -> DisplayLayoutFacts {
+        DisplayLayoutFacts {
+            id,
+            logical_x: x,
+            logical_y: y,
+            logical_width,
+            logical_height,
+            pixel_width,
+            pixel_height,
+            primary,
+        }
+    }
+
     #[test]
-    fn selection_excludes_pid_and_exact_window_id() {
+    fn selection_uses_frontmost_pid_and_excludes_exact_window_id() {
         assert_eq!(
-            select_active_window(
-                &[
-                    w(1, 7, true, true),
-                    w(2, 8, true, true),
-                    w(3, 9, true, true)
-                ],
-                7,
-                &[2]
-            ),
+            select_frontmost_window(&[w(1, 8, true), w(2, 7, true), w(3, 7, true),], 7, 99, &[2],),
             Some(2)
         );
     }
+
     #[test]
-    fn selection_requires_active_visible_normal_window() {
-        let mut top = w(3, 9, true, true);
+    fn selection_requires_visible_normal_window_from_frontmost_process() {
+        let mut top = w(3, 9, true);
         top.layer = 1;
         assert_eq!(
-            select_active_window(&[w(1, 7, false, true), w(2, 8, true, false), top], 99, &[]),
+            select_frontmost_window(&[w(1, 9, false), w(2, 8, true), top], 9, 99, &[]),
             None
         );
+    }
+
+    #[test]
+    fn physical_layout_uses_local_sizes_for_mixed_scale_adjacent_displays() {
+        let layouts = physical_display_layout(&[
+            display(1, 0.0, 0.0, 1440.0, 900.0, 2880, 1800, true),
+            display(2, 1440.0, 0.0, 1920.0, 1080.0, 1920, 1080, false),
+        ])
+        .unwrap();
+
+        assert_eq!(layouts[0], PhysicalRect::new(0, 0, 2880, 1800).unwrap());
+        assert_eq!(layouts[1], PhysicalRect::new(2880, 0, 1920, 1080).unwrap());
+    }
+
+    #[test]
+    fn physical_layout_accepts_same_scale_side_by_side_with_vertical_offset() {
+        let layouts = physical_display_layout(&[
+            display(1, 0.0, 0.0, 1920.0, 1080.0, 1920, 1080, true),
+            display(2, 1920.0, 120.0, 1600.0, 900.0, 1600, 900, false),
+        ])
+        .unwrap();
+
+        assert_eq!(layouts[1], PhysicalRect::new(1920, 120, 1600, 900).unwrap());
+    }
+
+    #[test]
+    fn physical_layout_preserves_negative_and_vertical_topology() {
+        let layouts = physical_display_layout(&[
+            display(1, 0.0, 0.0, 1920.0, 1080.0, 1920, 1080, true),
+            display(2, -1280.0, 0.0, 1280.0, 720.0, 2560, 1440, false),
+            display(3, 0.0, -900.0, 1600.0, 900.0, 1600, 900, false),
+        ])
+        .unwrap();
+
+        assert_eq!(layouts[1], PhysicalRect::new(-2560, 0, 2560, 1440).unwrap());
+        assert_eq!(layouts[2], PhysicalRect::new(0, -900, 1600, 900).unwrap());
+    }
+
+    #[test]
+    fn physical_layout_uses_rotated_displays_reported_physical_size() {
+        let layouts = physical_display_layout(&[
+            display(1, 0.0, 0.0, 1920.0, 1080.0, 1920, 1080, true),
+            display(2, 1920.0, 0.0, 1080.0, 1920.0, 1080, 1920, false),
+        ])
+        .unwrap();
+
+        assert_eq!(layouts[1], PhysicalRect::new(1920, 0, 1080, 1920).unwrap());
+    }
+
+    #[test]
+    fn physical_layout_rejects_ambiguous_cross_scale_offset() {
+        let error = physical_display_layout(&[
+            display(1, 0.0, 0.0, 1440.0, 900.0, 2880, 1800, true),
+            display(2, 1440.0, 100.0, 1920.0, 1080.0, 1920, 1080, false),
+        ])
+        .unwrap_err();
+
+        assert!(matches!(error, CaptureError::Backend(_)));
+    }
+
+    #[test]
+    fn compositor_keeps_first_provider_for_overlapping_pixels() {
+        let mut output = vec![0; 3 * 4];
+        let mut written = vec![false; 3];
+        composite_first_writer_masked(
+            &mut output,
+            &mut written,
+            3,
+            1,
+            0,
+            0,
+            2,
+            1,
+            &[1, 2, 3, 4, 5, 6, 7, 8],
+        )
+        .unwrap();
+        composite_first_writer_masked(
+            &mut output,
+            &mut written,
+            3,
+            1,
+            1,
+            0,
+            2,
+            1,
+            &[9, 10, 11, 12, 13, 14, 15, 16],
+        )
+        .unwrap();
+
+        assert_eq!(output, vec![1, 2, 3, 4, 5, 6, 7, 8, 13, 14, 15, 16]);
+        assert_eq!(written, vec![true, true, true]);
     }
     #[test]
     fn ordinary_error_is_not_permission_error() {

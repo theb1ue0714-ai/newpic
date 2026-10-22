@@ -1,6 +1,6 @@
 use newpic_platform::capture::{
-    capture_scale_metadata_for_region, normalize_native_rgba8, CaptureScaleSource,
-    NativePixelFormat,
+    capture_scale_metadata_for_region, normalize_native_rgba8, CaptureScaleMetadata,
+    CaptureScaleSource, NativePixelFormat,
 };
 use newpic_platform::geometry::{
     Display, DisplayId, DisplayOrientation, PhysicalPoint, PhysicalRect, ScaleFactor,
@@ -14,6 +14,14 @@ fn display(id: &str, rect: PhysicalRect, scale: f64) -> Display {
         false,
         DisplayOrientation::Landscape,
     )
+}
+
+#[test]
+fn compositor_owned_capture_can_report_unknown_scale_without_guessing() {
+    let metadata = CaptureScaleMetadata::unknown();
+    assert!(metadata.is_unknown());
+    assert_eq!(metadata.uniform_scale(), None);
+    assert_eq!(metadata.segments(), None);
 }
 
 #[test]

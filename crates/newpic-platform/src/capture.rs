@@ -320,6 +320,7 @@ impl CaptureScaleSegment {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CaptureScaleKind {
+    Unknown,
     Uniform(ScaleFactor),
     Mixed(Vec<CaptureScaleSegment>),
 }
@@ -330,6 +331,18 @@ pub struct CaptureScaleMetadata {
 }
 
 impl CaptureScaleMetadata {
+    /// Scale is intentionally unknown because a compositor owns the source
+    /// selection and does not return its desktop-space geometry.
+    pub const fn unknown() -> Self {
+        Self {
+            kind: CaptureScaleKind::Unknown,
+        }
+    }
+
+    pub const fn is_unknown(&self) -> bool {
+        matches!(self.kind, CaptureScaleKind::Unknown)
+    }
+
     pub const fn uniform(scale: ScaleFactor) -> Self {
         Self {
             kind: CaptureScaleKind::Uniform(scale),
@@ -371,6 +384,7 @@ impl CaptureScaleMetadata {
 
     pub fn segments(&self) -> Option<&[CaptureScaleSegment]> {
         match &self.kind {
+            CaptureScaleKind::Unknown => None,
             CaptureScaleKind::Uniform(_) => None,
             CaptureScaleKind::Mixed(segments) => Some(segments),
         }
@@ -378,6 +392,7 @@ impl CaptureScaleMetadata {
 
     pub const fn uniform_scale(&self) -> Option<ScaleFactor> {
         match &self.kind {
+            CaptureScaleKind::Unknown => None,
             CaptureScaleKind::Uniform(scale) => Some(*scale),
             CaptureScaleKind::Mixed(_) => None,
         }

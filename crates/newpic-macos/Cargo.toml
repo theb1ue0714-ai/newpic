@@ -8,4 +8,5 @@ license.workspace = true
 newpic-platform = { path = "../newpic-platform" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit.workspace = true
 screencapturekit.workspace = true

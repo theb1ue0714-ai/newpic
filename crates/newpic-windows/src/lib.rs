@@ -72,6 +72,86 @@ fn capture_with_runtime_fallback<T>(
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn restore_before_read<T>(
+    restore: impl FnOnce() -> Result<(), CaptureError>,
+    read: impl FnOnce() -> Result<T, CaptureError>,
+) -> Result<T, CaptureError> {
+    restore()?;
+    read()
+}
+
+#[cfg(any(target_os = "windows", test))]
+const fn gdi_selection_succeeded(handle: isize) -> bool {
+    handle != 0 && handle != -1
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[allow(clippy::too_many_arguments)]
+fn composite_rgba_first_writer(
+    destination: &mut [u8],
+    written: &mut [bool],
+    destination_width: u32,
+    destination_height: u32,
+    source: &[u8],
+    source_width: u32,
+    source_height: u32,
+    destination_x: usize,
+    destination_y: usize,
+) -> Result<(), CaptureError> {
+    let destination_width =
+        usize::try_from(destination_width).map_err(|_| CaptureError::ImageLayoutOverflow)?;
+    let destination_height =
+        usize::try_from(destination_height).map_err(|_| CaptureError::ImageLayoutOverflow)?;
+    let source_width =
+        usize::try_from(source_width).map_err(|_| CaptureError::ImageLayoutOverflow)?;
+    let source_height =
+        usize::try_from(source_height).map_err(|_| CaptureError::ImageLayoutOverflow)?;
+    let destination_pixels = destination_width
+        .checked_mul(destination_height)
+        .ok_or(CaptureError::ImageLayoutOverflow)?;
+    let source_pixels = source_width
+        .checked_mul(source_height)
+        .ok_or(CaptureError::ImageLayoutOverflow)?;
+    if destination.len()
+        != destination_pixels
+            .checked_mul(4)
+            .ok_or(CaptureError::ImageLayoutOverflow)?
+        || written.len() != destination_pixels
+        || source.len()
+            != source_pixels
+                .checked_mul(4)
+                .ok_or(CaptureError::ImageLayoutOverflow)?
+        || destination_x
+            .checked_add(source_width)
+            .is_none_or(|right| right > destination_width)
+        || destination_y
+            .checked_add(source_height)
+            .is_none_or(|bottom| bottom > destination_height)
+    {
+        return Err(CaptureError::Backend(
+            "region compositor received an invalid pixel layout".into(),
+        ));
+    }
+
+    for source_y in 0..source_height {
+        for source_x in 0..source_width {
+            let source_pixel = source_y * source_width + source_x;
+            let destination_pixel =
+                (destination_y + source_y) * destination_width + destination_x + source_x;
+            if written[destination_pixel] {
+                continue;
+            }
+            let source_start = source_pixel * 4;
+            let destination_start = destination_pixel * 4;
+            destination[destination_start..destination_start + 4]
+                .copy_from_slice(&source[source_start..source_start + 4]);
+            written[destination_pixel] = true;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct WindowsCaptureProvider;
 
@@ -219,8 +299,9 @@ mod platform {
     use xcap::{Monitor, Window};
 
     use super::{
-        capture_with_runtime_fallback, orientation_from_rotation, select_active_window,
-        WindowFacts, WindowsCaptureResult,
+        capture_with_runtime_fallback, composite_rgba_first_writer, gdi_selection_succeeded,
+        orientation_from_rotation, restore_before_read, select_active_window, WindowFacts,
+        WindowsCaptureResult,
     };
 
     fn backend_error(error: impl std::fmt::Display) -> CaptureError {
@@ -280,12 +361,43 @@ mod platform {
     struct SelectedObject {
         dc: HDC,
         previous: HGDIOBJ,
+        restored: bool,
+    }
+
+    impl SelectedObject {
+        fn new(dc: HDC, object: HGDIOBJ) -> Result<Self, CaptureError> {
+            let previous = unsafe { SelectObject(dc, object) };
+            if !gdi_selection_succeeded(previous.0 as isize) {
+                return Err(CaptureError::Backend("GDI SelectObject failed".into()));
+            }
+            Ok(Self {
+                dc,
+                previous,
+                restored: false,
+            })
+        }
+
+        fn restore(&mut self) -> Result<(), CaptureError> {
+            if self.restored {
+                return Ok(());
+            }
+            let replaced = unsafe { SelectObject(self.dc, self.previous) };
+            if !gdi_selection_succeeded(replaced.0 as isize) {
+                return Err(CaptureError::Backend(
+                    "GDI failed to restore the previously selected object".into(),
+                ));
+            }
+            self.restored = true;
+            Ok(())
+        }
     }
 
     impl Drop for SelectedObject {
         fn drop(&mut self) {
-            unsafe {
-                SelectObject(self.dc, self.previous);
+            if !self.restored {
+                unsafe {
+                    SelectObject(self.dc, self.previous);
+                }
             }
         }
     }
@@ -314,10 +426,7 @@ mod platform {
                 "GDI CreateCompatibleBitmap failed".into(),
             ));
         }
-        let _selection = SelectedObject {
-            dc: memory.0,
-            previous: unsafe { SelectObject(memory.0, bitmap.0.into()) },
-        };
+        let mut selection = SelectedObject::new(memory.0, bitmap.0.into())?;
 
         let copied = if print_window {
             unsafe { PrintWindow(source_window, memory.0, PRINT_WINDOW_FLAGS(2)).as_bool() }
@@ -373,17 +482,22 @@ mod platform {
             },
             ..Default::default()
         };
-        let rows = unsafe {
-            GetDIBits(
-                memory.0,
-                bitmap.0,
-                0,
-                height,
-                Some(bgra.as_mut_ptr().cast::<c_void>()),
-                &mut info,
-                DIB_RGB_COLORS,
-            )
-        };
+        let rows = restore_before_read(
+            || selection.restore(),
+            || {
+                Ok(unsafe {
+                    GetDIBits(
+                        memory.0,
+                        bitmap.0,
+                        0,
+                        height,
+                        Some(bgra.as_mut_ptr().cast::<c_void>()),
+                        &mut info,
+                        DIB_RGB_COLORS,
+                    )
+                })
+            },
+        )?;
         if rows != height_i32 {
             return Err(CaptureError::Backend(format!(
                 "GDI GetDIBits returned {rows} rows for {height_i32} requested rows"
@@ -479,6 +593,15 @@ mod platform {
             .checked_mul(usize::try_from(height).map_err(|_| CaptureError::ImageLayoutOverflow)?)
             .ok_or(CaptureError::ImageLayoutOverflow)?;
         let mut rgba = vec![0; output_len];
+        let pixel_count = usize::try_from(width)
+            .ok()
+            .and_then(|width| {
+                usize::try_from(height)
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .ok_or(CaptureError::ImageLayoutOverflow)?;
+        let mut written = vec![false; pixel_count];
 
         for (monitor, display) in &items {
             let Some(piece) = region.intersection(display.bounds()) else {
@@ -508,13 +631,17 @@ mod platform {
                 .map_err(|_| CaptureError::ImageLayoutOverflow)?;
             let destination_y = usize::try_from(piece.top() - region.top())
                 .map_err(|_| CaptureError::ImageLayoutOverflow)?;
-            let piece_stride = checked_stride(piece_width)?;
-            for source_y in 0..usize::try_from(piece_height).unwrap_or(0) {
-                let source_start = source_y * piece_stride;
-                let destination_start = (destination_y + source_y) * row_stride + destination_x * 4;
-                rgba[destination_start..destination_start + piece_stride]
-                    .copy_from_slice(&pixels[source_start..source_start + piece_stride]);
-            }
+            composite_rgba_first_writer(
+                &mut rgba,
+                &mut written,
+                width,
+                height,
+                &pixels,
+                piece_width,
+                piece_height,
+                destination_x,
+                destination_y,
+            )?;
         }
 
         CapturedImage::new(
@@ -721,6 +848,8 @@ mod platform {
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::RefCell, rc::Rc};
+
     use super::*;
     use newpic_platform::{
         capture::{CaptureOptions, CaptureSource},
@@ -820,5 +949,74 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn region_compositor_keeps_pixels_from_the_lower_provider_z_order() {
+        let mut destination = vec![0; 3 * 4];
+        let mut written = vec![false; 3];
+        let front = vec![255, 0, 0, 255, 255, 0, 0, 255];
+        let behind = vec![0, 0, 255, 255, 0, 0, 255, 255];
+
+        composite_rgba_first_writer(&mut destination, &mut written, 3, 1, &front, 2, 1, 0, 0)
+            .unwrap();
+        composite_rgba_first_writer(&mut destination, &mut written, 3, 1, &behind, 2, 1, 1, 0)
+            .unwrap();
+
+        assert_eq!(
+            destination,
+            vec![
+                255, 0, 0, 255, // lower z-order display
+                255, 0, 0, 255, // overlap keeps lower z-order display
+                0, 0, 255, 255, // uncovered pixel comes from later display
+            ]
+        );
+        assert_eq!(written, vec![true, true, true]);
+    }
+
+    #[test]
+    fn gdi_pixel_read_runs_only_after_bitmap_restore() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let restore_events = Rc::clone(&events);
+        let read_events = Rc::clone(&events);
+
+        let rows = restore_before_read(
+            || {
+                restore_events.borrow_mut().push("restore");
+                Ok(())
+            },
+            || {
+                read_events.borrow_mut().push("read");
+                Ok(7)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(rows, 7);
+        assert_eq!(&*events.borrow(), &["restore", "read"]);
+    }
+
+    #[test]
+    fn failed_gdi_bitmap_restore_prevents_pixel_read() {
+        let read_called = RefCell::new(false);
+
+        let error = restore_before_read(
+            || Err(CaptureError::Backend("restore failed".into())),
+            || {
+                *read_called.borrow_mut() = true;
+                Ok(7)
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("restore failed"));
+        assert!(!*read_called.borrow());
+    }
+
+    #[test]
+    fn gdi_selection_rejects_null_and_error_sentinel_handles() {
+        assert!(!gdi_selection_succeeded(0));
+        assert!(!gdi_selection_succeeded(-1));
+        assert!(gdi_selection_succeeded(42));
     }
 }

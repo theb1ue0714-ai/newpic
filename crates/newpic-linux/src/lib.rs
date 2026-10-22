@@ -71,24 +71,24 @@ impl CaptureProvider for LinuxCaptureProvider {
                 )),
             LinuxSession::Wayland => CaptureCapabilities::new(CaptureBackend::XdgDesktopPortal)
                 .with_region_capture(CapabilityStatus::limited(
-                    "the XDG Desktop Portal controls authorization and may show a consent prompt",
-                    Some("approve the desktop capture prompt when shown"),
+                    "the compositor owns area selection; an exact preselected rectangle or unattended repeat cannot be guaranteed",
+                    Some("select the requested area in the portal prompt"),
                 ))
                 .with_active_window_capture(CapabilityStatus::unsupported(
                     "Wayland does not expose a reliable focused-window capture through this backend",
                     Some("use region capture instead"),
                 ))
-                .with_display_capture(CapabilityStatus::limited(
-                    "the XDG Desktop Portal returns a desktop screenshot that NewPic crops to the requested display",
-                    Some("approve the requested display when prompted"),
+                .with_display_capture(CapabilityStatus::unsupported(
+                    "the Screenshot portal does not identify a requested physical display in its response",
+                    Some("use compositor-owned area selection instead"),
                 ))
                 .with_unattended_capture(CapabilityStatus::limited(
                     "Wayland capture may require user consent",
                     None::<String>,
                 ))
-                .with_pointer_capture(CapabilityStatus::unsupported(
-                    "pointer inclusion is not controllable through xcap 0.9.8",
-                    Some("capture without the pointer"),
+                .with_pointer_capture(CapabilityStatus::limited(
+                    "pointer inclusion is controlled by the compositor and cannot be guaranteed",
+                    None::<String>,
                 )),
         }
     }
@@ -101,7 +101,7 @@ impl CaptureProvider for LinuxCaptureProvider {
     }
 
     fn capture(&self, request: CaptureRequest) -> Result<CapturedImage, CaptureError> {
-        if request.options().include_pointer() {
+        if self.session == LinuxSession::X11 && request.options().include_pointer() {
             return Err(CaptureError::Unsupported {
                 operation: "pointer capture",
                 reason: self
@@ -123,6 +123,17 @@ impl CaptureProvider for LinuxCaptureProvider {
                 reason:
                     "Wayland does not expose a reliable focused-window capture through this backend"
                         .into(),
+            });
+        }
+        if self.session == LinuxSession::Wayland
+            && matches!(
+                request.source(),
+                newpic_platform::capture::CaptureSource::Display(_)
+            )
+        {
+            return Err(CaptureError::Unsupported {
+                operation: "specific-display capture",
+                reason: "the XDG Screenshot portal does not identify a requested display".into(),
             });
         }
         let backend = self.capabilities().backend();
@@ -487,24 +498,15 @@ mod platform {
     }
 
     pub(super) fn capture_wayland(request: CaptureRequest) -> Result<CapturedImage, CaptureError> {
-        let displays = displays_wayland()?;
-        let virtual_left = displays
-            .iter()
-            .map(|display| display.bounds().left())
-            .min()
-            .ok_or_else(|| CaptureError::BackendUnavailable("no display is attached".into()))?;
-        let virtual_top = displays
-            .iter()
-            .map(|display| display.bounds().top())
-            .min()
-            .ok_or_else(|| CaptureError::BackendUnavailable("no display is attached".into()))?;
-        let requested = match request.source() {
-            CaptureSource::Region(region) => *region,
-            CaptureSource::Display(id) => displays
-                .iter()
-                .find(|display| display.id() == id)
-                .map(|display| display.bounds())
-                .ok_or_else(|| CaptureError::DisplayNotFound(id.clone()))?,
+        match request.source() {
+            CaptureSource::Region(_) => {}
+            CaptureSource::Display(_) => {
+                return Err(CaptureError::Unsupported {
+                    operation: "specific-display capture",
+                    reason: "the XDG Screenshot portal does not identify a requested display"
+                        .into(),
+                });
+            }
             CaptureSource::ActiveWindow => {
                 return Err(CaptureError::Unsupported {
                     operation: "active-window capture",
@@ -513,12 +515,12 @@ mod platform {
                             .into(),
                 });
             }
-        };
+        }
         let response = futures_lite::future::block_on(async {
             Screenshot::request()
                 .modal(true)
-                .interactive(false)
-                .target(AvailableTargets::Screen)
+                .interactive(true)
+                .target(AvailableTargets::Area)
                 .send()
                 .await
                 .map_err(|error| classify_portal_error(&error.to_string()))?
@@ -540,39 +542,8 @@ mod platform {
         let image = image::open(&screenshot.0)
             .map_err(|error| CaptureError::Backend(format!("cannot read portal image: {error}")))?
             .to_rgba8();
-        let crop_x = u32::try_from(requested.left() - virtual_left)
-            .map_err(|_| CaptureError::ImageLayoutOverflow)?;
-        let crop_y = u32::try_from(requested.top() - virtual_top)
-            .map_err(|_| CaptureError::ImageLayoutOverflow)?;
-        let crop_right = crop_x
-            .checked_add(requested.size().width())
-            .ok_or(CaptureError::ImageLayoutOverflow)?;
-        let crop_bottom = crop_y
-            .checked_add(requested.size().height())
-            .ok_or(CaptureError::ImageLayoutOverflow)?;
-        if crop_right > image.width() || crop_bottom > image.height() {
-            return Err(CaptureError::Backend(format!(
-                "portal image {}x{} does not cover requested virtual-desktop rectangle",
-                image.width(),
-                image.height()
-            )));
-        }
-        let cropped = image::imageops::crop_imm(
-            &image,
-            crop_x,
-            crop_y,
-            requested.size().width(),
-            requested.size().height(),
-        )
-        .to_image();
-        let metadata = capture_scale_metadata_for_region(requested, &displays)?;
-        let provenance = match request.source() {
-            CaptureSource::Region(_) => CaptureProvenance::Region,
-            CaptureSource::Display(id) => CaptureProvenance::Display(id.clone()),
-            CaptureSource::ActiveWindow => unreachable!("handled above"),
-        };
-        let width = cropped.width();
-        let height = cropped.height();
+        let width = image.width();
+        let height = image.height();
         let row_stride = usize::try_from(width)
             .ok()
             .and_then(|width| width.checked_mul(4))
@@ -581,9 +552,9 @@ mod platform {
             width,
             height,
             row_stride,
-            cropped.into_raw(),
-            metadata,
-            provenance,
+            image.into_raw(),
+            CaptureScaleMetadata::unknown(),
+            CaptureProvenance::Region,
         )
     }
 }
