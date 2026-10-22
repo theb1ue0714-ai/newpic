@@ -1,14 +1,15 @@
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
 use newpic_core::settings::{
-    load_or_recover, migrate_json, ClipboardSettings, CorruptionRecovery, Hotkeys, ImageFormat,
-    JsonFileSettingsRepository, Language, LoadSettingsError, NamingSettings, RecoveryNotice,
-    SaveDirectory, Settings, SettingsMigrationError, SettingsRepository, SettingsRepositoryError,
-    SettingsValidationError, Size, CURRENT_SCHEMA_VERSION,
+    load_or_recover, migrate_json, ClipboardSettings, ConditionalSave, CorruptionRecovery,
+    ExpectedSettingsState, Hotkeys, ImageFormat, JsonFileSettingsRepository, Language,
+    LoadSettingsError, NamingSettings, RecoveryNotice, SaveDirectory, Settings,
+    SettingsMigrationError, SettingsRepository, SettingsRepositoryError, SettingsValidationError,
+    Size, CURRENT_SCHEMA_VERSION,
 };
 
 #[test]
@@ -451,6 +452,77 @@ fn changed_source_after_corrupt_read_is_reloaded_without_backup_or_overwrite() {
     assert_eq!(backup_files(temp.path()).len(), 0);
 }
 
+#[test]
+fn stale_schema_zero_migration_does_not_overwrite_newer_current_settings() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let path = temp.path().join("settings.json");
+    fs::write(&path, include_str!("fixtures/settings-schema-0.json"))
+        .expect("write schema zero source");
+    let replacement = Settings {
+        check_updates: true,
+        ..Settings::default()
+    };
+    let repository = InterleavingRepository {
+        inner: JsonFileSettingsRepository::new(&path),
+        replacement: replacement.clone(),
+        replace_after_first_load: AtomicBool::new(true),
+    };
+
+    let outcome = load_or_recover(&repository).expect("new current settings are reloaded");
+
+    assert_eq!(outcome.settings, replacement);
+    assert_eq!(outcome.notice, None);
+    assert_eq!(read_settings(&path), replacement);
+}
+
+#[test]
+fn concurrent_initial_creation_preserves_settings_that_appeared_after_missing_read() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let path = temp.path().join("settings.json");
+    let replacement = Settings {
+        include_pointer: true,
+        ..Settings::default()
+    };
+    let repository = InterleavingRepository {
+        inner: JsonFileSettingsRepository::new(&path),
+        replacement: replacement.clone(),
+        replace_after_first_load: AtomicBool::new(true),
+    };
+
+    let outcome = load_or_recover(&repository).expect("concurrent creation is reloaded");
+
+    assert_eq!(outcome.settings, replacement);
+    assert_eq!(outcome.notice, None);
+    assert_eq!(read_settings(&path), replacement);
+}
+
+#[test]
+fn final_allowed_source_change_is_decoded_before_retry_limit() {
+    let replacement = Settings {
+        autostart: false,
+        ..Settings::default()
+    };
+    let repository = ChurningRepository::new(Some((8, replacement.clone())));
+
+    let outcome = load_or_recover(&repository).expect("eighth changed value is decoded");
+
+    assert_eq!(outcome.settings, replacement);
+    assert_eq!(repository.recovery_calls.load(Ordering::SeqCst), 8);
+}
+
+#[test]
+fn ninth_consecutive_source_change_hits_the_defined_retry_limit() {
+    let repository = ChurningRepository::new(None);
+
+    let result = load_or_recover(&repository);
+
+    assert!(matches!(
+        result,
+        Err(LoadSettingsError::ConcurrentModification)
+    ));
+    assert_eq!(repository.recovery_calls.load(Ordering::SeqCst), 9);
+}
+
 #[cfg(unix)]
 #[test]
 fn failed_backup_claim_preserves_source_and_existing_backup() {
@@ -499,6 +571,14 @@ impl SettingsRepository for InterleavingRepository {
         self.inner.save(settings)
     }
 
+    fn save_if_unchanged(
+        &self,
+        expected: ExpectedSettingsState<'_>,
+        settings: &Settings,
+    ) -> Result<ConditionalSave, SettingsRepositoryError> {
+        self.inner.save_if_unchanged(expected, settings)
+    }
+
     fn recover_corrupted_if_unchanged(
         &self,
         expected: &str,
@@ -506,6 +586,53 @@ impl SettingsRepository for InterleavingRepository {
     ) -> Result<CorruptionRecovery, SettingsRepositoryError> {
         self.inner
             .recover_corrupted_if_unchanged(expected, replacement)
+    }
+}
+
+struct ChurningRepository {
+    recovery_calls: AtomicUsize,
+    valid_after: Option<(usize, Settings)>,
+}
+
+impl ChurningRepository {
+    fn new(valid_after: Option<(usize, Settings)>) -> Self {
+        Self {
+            recovery_calls: AtomicUsize::new(0),
+            valid_after,
+        }
+    }
+}
+
+impl SettingsRepository for ChurningRepository {
+    fn load(&self) -> Result<Option<String>, SettingsRepositoryError> {
+        Ok(Some("{ corrupt-0".to_owned()))
+    }
+
+    fn save(&self, _settings: &Settings) -> Result<(), SettingsRepositoryError> {
+        unreachable!("churning recovery never performs an unconditional save")
+    }
+
+    fn save_if_unchanged(
+        &self,
+        _expected: ExpectedSettingsState<'_>,
+        _settings: &Settings,
+    ) -> Result<ConditionalSave, SettingsRepositoryError> {
+        unreachable!("churning corrupt input never performs a migration save")
+    }
+
+    fn recover_corrupted_if_unchanged(
+        &self,
+        _expected: &str,
+        _replacement: &Settings,
+    ) -> Result<CorruptionRecovery, SettingsRepositoryError> {
+        let call = self.recovery_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        let contents = match &self.valid_after {
+            Some((valid_after, settings)) if call == *valid_after => {
+                serde_json::to_string(settings).expect("serialize valid changed settings")
+            }
+            _ => format!("{{ corrupt-{call}"),
+        };
+        Ok(CorruptionRecovery::SourceChanged { contents })
     }
 }
 

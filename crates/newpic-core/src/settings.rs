@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
-const MAX_RECOVERY_RELOADS: usize = 8;
+const MAX_SOURCE_CHANGES: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
@@ -319,6 +319,13 @@ fn migrate_schema_zero(old: SchemaZeroSettings) -> Settings {
 pub trait SettingsRepository {
     fn load(&self) -> Result<Option<String>, SettingsRepositoryError>;
     fn save(&self, settings: &Settings) -> Result<(), SettingsRepositoryError>;
+    /// Creates or migrates settings only while the on-disk state still equals
+    /// `expected`. The comparison and save must share one cross-process lock.
+    fn save_if_unchanged(
+        &self,
+        expected: ExpectedSettingsState<'_>,
+        settings: &Settings,
+    ) -> Result<ConditionalSave, SettingsRepositoryError>;
     /// Replaces a corrupt file only when its current bytes still equal
     /// `expected`. Implementations must make the comparison, backup claim, and
     /// replacement one cross-process critical section.
@@ -327,6 +334,18 @@ pub trait SettingsRepository {
         expected: &str,
         replacement: &Settings,
     ) -> Result<CorruptionRecovery, SettingsRepositoryError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpectedSettingsState<'a> {
+    Missing,
+    Contents(&'a str),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConditionalSave {
+    Saved,
+    SourceChanged { contents: Option<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -445,20 +464,46 @@ impl JsonFileSettingsRepository {
         }
         unreachable!("the backup sequence is unbounded")
     }
+
+    fn read_current(&self) -> Result<Option<String>, SettingsRepositoryError> {
+        match fs::read_to_string(&self.path) {
+            Ok(json) => Ok(Some(json)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
 }
 
 impl SettingsRepository for JsonFileSettingsRepository {
     fn load(&self) -> Result<Option<String>, SettingsRepositoryError> {
-        match fs::read_to_string(&self.path) {
-            Ok(json) => Ok(Some(json)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.into()),
-        }
+        self.read_current()
     }
 
     fn save(&self, settings: &Settings) -> Result<(), SettingsRepositoryError> {
         let json = Self::serialize(settings)?;
         self.with_exclusive_lock(|| self.save_bytes_unlocked(&json))
+    }
+
+    fn save_if_unchanged(
+        &self,
+        expected: ExpectedSettingsState<'_>,
+        settings: &Settings,
+    ) -> Result<ConditionalSave, SettingsRepositoryError> {
+        let replacement = Self::serialize(settings)?;
+        self.with_exclusive_lock(|| {
+            let current = self.read_current()?;
+            let unchanged = match (expected, current.as_deref()) {
+                (ExpectedSettingsState::Missing, None) => true,
+                (ExpectedSettingsState::Contents(expected), Some(current)) => expected == current,
+                _ => false,
+            };
+            if !unchanged {
+                return Ok(ConditionalSave::SourceChanged { contents: current });
+            }
+
+            self.save_bytes_unlocked(&replacement)?;
+            Ok(ConditionalSave::Saved)
+        })
     }
 
     fn recover_corrupted_if_unchanged(
@@ -535,42 +580,76 @@ pub enum LoadSettingsError {
 pub fn load_or_recover<R: SettingsRepository>(
     repository: &R,
 ) -> Result<LoadSettingsOutcome, LoadSettingsError> {
-    let Some(mut json) = repository.load()? else {
-        let settings = Settings::default();
-        repository.save(&settings)?;
-        return Ok(LoadSettingsOutcome {
-            settings,
-            notice: None,
-        });
-    };
+    enum LoadedState {
+        Missing,
+        Contents(String),
+    }
 
-    for _ in 0..MAX_RECOVERY_RELOADS {
-        match decode_json(&json) {
-            Ok(decoded) => {
-                if decoded.migrated {
-                    repository.save(&decoded.settings)?;
-                }
-                return Ok(LoadSettingsOutcome {
-                    settings: decoded.settings,
-                    notice: None,
-                });
-            }
-            Err(SettingsMigrationError::MalformedJson(_) | SettingsMigrationError::Invalid(_)) => {
+    let mut state = match repository.load()? {
+        Some(json) => LoadedState::Contents(json),
+        None => LoadedState::Missing,
+    };
+    let mut source_changes = 0;
+
+    loop {
+        let changed = match state {
+            LoadedState::Missing => {
                 let settings = Settings::default();
-                match repository.recover_corrupted_if_unchanged(&json, &settings)? {
-                    CorruptionRecovery::Recovered { backup_path } => {
+                match repository.save_if_unchanged(ExpectedSettingsState::Missing, &settings)? {
+                    ConditionalSave::Saved => {
                         return Ok(LoadSettingsOutcome {
                             settings,
-                            notice: Some(RecoveryNotice::CorruptedSettings { backup_path }),
+                            notice: None,
                         });
                     }
-                    CorruptionRecovery::SourceChanged { contents } => json = contents,
+                    ConditionalSave::SourceChanged { contents } => contents,
                 }
             }
-            Err(error @ SettingsMigrationError::UnsupportedSchema(_)) => {
-                return Err(error.into());
-            }
+            LoadedState::Contents(json) => match decode_json(&json) {
+                Ok(decoded) if !decoded.migrated => {
+                    return Ok(LoadSettingsOutcome {
+                        settings: decoded.settings,
+                        notice: None,
+                    });
+                }
+                Ok(decoded) => match repository
+                    .save_if_unchanged(ExpectedSettingsState::Contents(&json), &decoded.settings)?
+                {
+                    ConditionalSave::Saved => {
+                        return Ok(LoadSettingsOutcome {
+                            settings: decoded.settings,
+                            notice: None,
+                        });
+                    }
+                    ConditionalSave::SourceChanged { contents } => contents,
+                },
+                Err(
+                    SettingsMigrationError::MalformedJson(_) | SettingsMigrationError::Invalid(_),
+                ) => {
+                    let settings = Settings::default();
+                    match repository.recover_corrupted_if_unchanged(&json, &settings)? {
+                        CorruptionRecovery::Recovered { backup_path } => {
+                            return Ok(LoadSettingsOutcome {
+                                settings,
+                                notice: Some(RecoveryNotice::CorruptedSettings { backup_path }),
+                            });
+                        }
+                        CorruptionRecovery::SourceChanged { contents } => Some(contents),
+                    }
+                }
+                Err(error @ SettingsMigrationError::UnsupportedSchema(_)) => {
+                    return Err(error.into());
+                }
+            },
+        };
+
+        source_changes += 1;
+        if source_changes > MAX_SOURCE_CHANGES {
+            return Err(LoadSettingsError::ConcurrentModification);
         }
+        state = match changed {
+            Some(json) => LoadedState::Contents(json),
+            None => LoadedState::Missing,
+        };
     }
-    Err(LoadSettingsError::ConcurrentModification)
 }
