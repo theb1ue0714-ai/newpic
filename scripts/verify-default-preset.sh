@@ -39,6 +39,11 @@ printf '%s\n' "$rust_output"
 grep -Fq 'test default_preset_matches_every_approved_design_value ... ok' <<<"$rust_output"
 grep -Fq '1 passed; 0 failed' <<<"$rust_output"
 
+migration_output="$(cargo test -p newpic-core --test settings schema_one_migrates_to_persistent_f9_shape -- --exact 2>&1)"
+printf '%s\n' "$migration_output"
+grep -Fq 'test schema_one_migrates_to_persistent_f9_shape ... ok' <<<"$migration_output"
+grep -Fq '1 passed; 0 failed' <<<"$migration_output"
+
 ui_result="$(mktemp)"
 trap 'rm -f "$ui_result"' EXIT
 npm exec --workspace=@newpic/desktop -- vitest run src/App.test.tsx -t 'shows every approved default' --reporter=json --outputFile="$ui_result"

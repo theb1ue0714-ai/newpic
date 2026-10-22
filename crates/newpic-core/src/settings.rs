@@ -396,6 +396,8 @@ struct SchemaZeroSettings {
     active_window_hotkey: String,
 }
 
+// Legacy migrations deliberately retain only fields defined by that schema.
+// Current-schema loads remain read-only, so their original unknown fields stay on disk.
 #[derive(Deserialize)]
 struct SchemaOneSettings {
     schema_version: u32,
