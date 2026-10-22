@@ -1,11 +1,12 @@
-import { describe, it, expect } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
   initialSelectionState,
   selectionReducer,
   logicalToPhysical,
   physicalToLogical,
-  type Rect,
   type DisplayBounds,
+  type Rect,
+  type ResizeHandle,
 } from './selection';
 
 describe('selection reducer and coordinate helpers', () => {
@@ -14,43 +15,211 @@ describe('selection reducer and coordinate helpers', () => {
     y: 0,
     width: 1920,
     height: 1080,
-    scaleFactor: 1.0,
+    scaleFactor: 1,
   };
 
-  it('handles pointer down, move, and up for standard top-left to bottom-right drag', () => {
-    let state = initialSelectionState({
-      mode: 'free_region',
-      displayBounds: defaultDisplay,
-    });
+  function loadFixed(rect?: Rect, displayBounds = defaultDisplay) {
+    return selectionReducer(
+      initialSelectionState({ mode: 'free_region', displayBounds: defaultDisplay }),
+      { type: 'LOAD_OVERLAY', mode: 'fixed_size', displayBounds, rect }
+    );
+  }
 
+  function resize(handle: ResizeHandle, point: { x: number; y: number }) {
+    const handleStarts: Record<ResizeHandle, { x: number; y: number }> = {
+      n: { x: 200, y: 100 },
+      ne: { x: 300, y: 100 },
+      e: { x: 300, y: 150 },
+      se: { x: 300, y: 200 },
+      s: { x: 200, y: 200 },
+      sw: { x: 100, y: 200 },
+      w: { x: 100, y: 150 },
+      nw: { x: 100, y: 100 },
+    };
+    let state = loadFixed({ x: 100, y: 100, width: 200, height: 100 });
     state = selectionReducer(state, {
       type: 'POINTER_DOWN',
-      point: { x: 100, y: 150 },
+      point: handleStarts[handle],
+      target: handle,
     });
-    expect(state.status).toBe('selecting');
-    expect(state.startPoint).toEqual({ x: 100, y: 150 });
-    expect(state.currentRect).toEqual({ x: 100, y: 150, width: 1, height: 1 });
+    return selectionReducer(state, { type: 'POINTER_MOVE', point });
+  }
 
-    state = selectionReducer(state, {
-      type: 'POINTER_MOVE',
-      point: { x: 300, y: 250 },
-    });
-    expect(state.currentRect).toEqual({ x: 100, y: 150, width: 200, height: 100 });
+  it('loads F9 from a supplied display-local rectangle', () => {
+    const state = loadFixed({ x: 120, y: 80, width: 640, height: 480 });
 
-    state = selectionReducer(state, {
-      type: 'POINTER_UP',
-      point: { x: 300, y: 250 },
-    });
-    expect(state.status).toBe('completed');
-    expect(state.lastCompletedRegion).toEqual({ x: 100, y: 150, width: 200, height: 100 });
+    expect(state.mode).toBe('fixed_size');
+    expect(state.status).toBe('idle');
+    expect(state.currentRect).toEqual({ x: 120, y: 80, width: 640, height: 480 });
+    expect(state.interaction).toBeNull();
   });
 
-  it('normalizes reverse-direction drags (bottom-right to top-left)', () => {
+  it('centers and clamps the default 800x600 F9 rectangle when none is supplied', () => {
+    const state = loadFixed();
+
+    expect(state.currentRect).toEqual({ x: 560, y: 240, width: 800, height: 600 });
+
+    const smallDisplay: DisplayBounds = {
+      x: -1280,
+      y: 0,
+      width: 640,
+      height: 480,
+      scaleFactor: 1,
+    };
+    expect(loadFixed(undefined, smallDisplay).currentRect).toEqual({
+      x: 0,
+      y: 0,
+      width: 640,
+      height: 480,
+    });
+  });
+
+  it('does not move F9 for hover movement or background clicks', () => {
+    const initial = loadFixed({ x: 100, y: 120, width: 800, height: 600 });
+    const hovered = selectionReducer(initial, {
+      type: 'POINTER_MOVE',
+      point: { x: 1500, y: 800 },
+    });
+    const backgroundPressed = selectionReducer(hovered, {
+      type: 'POINTER_DOWN',
+      point: { x: 20, y: 20 },
+    });
+
+    expect(hovered.currentRect).toEqual(initial.currentRect);
+    expect(backgroundPressed.currentRect).toEqual(initial.currentRect);
+    expect(backgroundPressed.interaction).toBeNull();
+  });
+
+  it('moves F9 while preserving the initial pointer offset', () => {
+    let state = loadFixed({ x: 100, y: 120, width: 800, height: 600 });
+    state = selectionReducer(state, {
+      type: 'POINTER_DOWN',
+      point: { x: 175, y: 200 },
+      target: 'rect',
+    });
+    state = selectionReducer(state, {
+      type: 'POINTER_MOVE',
+      point: { x: 475, y: 400 },
+    });
+
+    expect(state.currentRect).toEqual({ x: 400, y: 320, width: 800, height: 600 });
+    expect(state.status).toBe('selecting');
+  });
+
+  it.each<[ResizeHandle, { x: number; y: number }, Rect]>([
+    ['n', { x: 100, y: 80 }, { x: 100, y: 80, width: 200, height: 120 }],
+    ['ne', { x: 330, y: 80 }, { x: 100, y: 80, width: 230, height: 120 }],
+    ['e', { x: 330, y: 100 }, { x: 100, y: 100, width: 230, height: 100 }],
+    ['se', { x: 330, y: 230 }, { x: 100, y: 100, width: 230, height: 130 }],
+    ['s', { x: 100, y: 230 }, { x: 100, y: 100, width: 200, height: 130 }],
+    ['sw', { x: 80, y: 230 }, { x: 80, y: 100, width: 220, height: 130 }],
+    ['w', { x: 80, y: 100 }, { x: 80, y: 100, width: 220, height: 100 }],
+    ['nw', { x: 80, y: 80 }, { x: 80, y: 80, width: 220, height: 120 }],
+  ])('resizes F9 from the %s handle', (handle, point, expected) => {
+    expect(resize(handle, point).currentRect).toEqual(expected);
+  });
+
+  it('stops reverse-direction resizing at 1x1 instead of flipping handles', () => {
+    expect(resize('nw', { x: 500, y: 500 }).currentRect).toEqual({
+      x: 299,
+      y: 199,
+      width: 1,
+      height: 1,
+    });
+    expect(resize('se', { x: -500, y: -500 }).currentRect).toEqual({
+      x: 100,
+      y: 100,
+      width: 1,
+      height: 1,
+    });
+  });
+
+  it('clamps moving and resizing to display-local logical bounds', () => {
+    let moving = loadFixed({ x: 100, y: 100, width: 800, height: 600 });
+    moving = selectionReducer(moving, {
+      type: 'POINTER_DOWN',
+      point: { x: 200, y: 200 },
+      target: 'rect',
+    });
+    moving = selectionReducer(moving, {
+      type: 'POINTER_MOVE',
+      point: { x: 3000, y: 2000 },
+    });
+    expect(moving.currentRect).toEqual({ x: 1120, y: 480, width: 800, height: 600 });
+
+    let resizing = loadFixed({ x: 100, y: 100, width: 200, height: 100 });
+    resizing = selectionReducer(resizing, {
+      type: 'POINTER_DOWN',
+      point: { x: 100, y: 100 },
+      target: 'nw',
+    });
+    resizing = selectionReducer(resizing, {
+      type: 'POINTER_MOVE',
+      point: { x: -500, y: -500 },
+    });
+    expect(resizing.currentRect).toEqual({ x: 0, y: 0, width: 300, height: 200 });
+  });
+
+  it('ends F9 interaction on pointer-up without completing capture', () => {
+    let state = loadFixed({ x: 100, y: 100, width: 800, height: 600 });
+    state = selectionReducer(state, {
+      type: 'POINTER_DOWN',
+      point: { x: 150, y: 150 },
+      target: 'rect',
+    });
+    state = selectionReducer(state, {
+      type: 'POINTER_MOVE',
+      point: { x: 250, y: 250 },
+    });
+    state = selectionReducer(state, { type: 'POINTER_UP' });
+
+    expect(state.status).toBe('idle');
+    expect(state.interaction).toBeNull();
+    expect(state.lastCompletedRegion).toBeNull();
+    expect(state.currentRect).toEqual({ x: 200, y: 200, width: 800, height: 600 });
+  });
+
+  it('completes F9 only through CONFIRM when a valid rectangle exists', () => {
+    const state = selectionReducer(
+      loadFixed({ x: 100, y: 100, width: 800, height: 600 }),
+      { type: 'CONFIRM' }
+    );
+
+    expect(state.status).toBe('completed');
+    expect(state.lastCompletedRegion).toEqual({ x: 100, y: 100, width: 800, height: 600 });
+
+    const missing = initialSelectionState({
+      mode: 'fixed_size',
+      displayBounds: defaultDisplay,
+    });
+    expect(selectionReducer(missing, { type: 'CONFIRM' }).status).toBe('idle');
+  });
+
+  it('cancels F9 without replacing an externally persisted rectangle', () => {
+    const previouslyPersisted: Rect = { x: 50, y: 50, width: 300, height: 200 };
+    let state = initialSelectionState({
+      mode: 'fixed_size',
+      displayBounds: defaultDisplay,
+      lastCompletedRegion: previouslyPersisted,
+    });
+    state = selectionReducer(state, {
+      type: 'LOAD_OVERLAY',
+      mode: 'fixed_size',
+      displayBounds: defaultDisplay,
+      rect: { x: 500, y: 400, width: 600, height: 500 },
+    });
+    state = selectionReducer(state, { type: 'CANCEL' });
+
+    expect(state.status).toBe('cancelled');
+    expect(state.currentRect).toBeNull();
+    expect(state.lastCompletedRegion).toEqual(previouslyPersisted);
+  });
+
+  it('keeps F7 drag completion on pointer-up unchanged', () => {
     let state = initialSelectionState({
       mode: 'free_region',
       displayBounds: defaultDisplay,
     });
-
     state = selectionReducer(state, {
       type: 'POINTER_DOWN',
       point: { x: 400, y: 300 },
@@ -59,179 +228,52 @@ describe('selection reducer and coordinate helpers', () => {
       type: 'POINTER_MOVE',
       point: { x: 150, y: 100 },
     });
-
-    expect(state.currentRect).toEqual({
-      x: 150,
-      y: 100,
-      width: 250,
-      height: 200,
-    });
-
     state = selectionReducer(state, {
       type: 'POINTER_UP',
-    });
-    expect(state.status).toBe('completed');
-    expect(state.lastCompletedRegion).toEqual({
-      x: 150,
-      y: 100,
-      width: 250,
-      height: 200,
-    });
-  });
-
-  it('enforces a minimum 1x1 selection even on single-click or 0-pixel delta', () => {
-    let state = initialSelectionState({
-      mode: 'free_region',
-      displayBounds: defaultDisplay,
-    });
-
-    state = selectionReducer(state, {
-      type: 'POINTER_DOWN',
-      point: { x: 250, y: 250 },
-    });
-    state = selectionReducer(state, {
-      type: 'POINTER_UP',
-      point: { x: 250, y: 250 },
+      point: { x: 150, y: 100 },
     });
 
     expect(state.status).toBe('completed');
-    expect(state.lastCompletedRegion).toEqual({
-      x: 250,
-      y: 250,
-      width: 1,
-      height: 1,
-    });
+    expect(state.lastCompletedRegion).toEqual({ x: 150, y: 100, width: 250, height: 200 });
   });
 
-  it('handles escape cancellation and preserves F8 last completed region', () => {
-    const previousRegion: Rect = { x: 50, y: 50, width: 300, height: 200 };
-    let state = initialSelectionState({
-      mode: 'free_region',
-      displayBounds: defaultDisplay,
-      lastCompletedRegion: previousRegion,
-    });
+  it('converts local logical rectangles through scale and global physical display origin', () => {
+    const leftDisplay: DisplayBounds = {
+      x: -2560,
+      y: 180,
+      width: 2560,
+      height: 1440,
+      scaleFactor: 2,
+    };
+    const localLogical: Rect = { x: 100, y: 150, width: 400, height: 300 };
 
-    state = selectionReducer(state, {
-      type: 'POINTER_DOWN',
-      point: { x: 500, y: 500 },
-    });
-    state = selectionReducer(state, {
-      type: 'POINTER_MOVE',
-      point: { x: 700, y: 800 },
-    });
-    expect(state.status).toBe('selecting');
-    expect(state.currentRect).toEqual({ x: 500, y: 500, width: 200, height: 300 });
-
-    state = selectionReducer(state, { type: 'CANCEL' });
-
-    expect(state.status).toBe('cancelled');
-    expect(state.currentRect).toBeNull();
-    // Must preserve previous F8 region!
-    expect(state.lastCompletedRegion).toEqual(previousRegion);
-  });
-
-  it('handles fixed 800x600 movement centered at pointer', () => {
-    let state = initialSelectionState({
-      mode: 'fixed_size',
-      fixedSize: { width: 800, height: 600 },
-      displayBounds: defaultDisplay,
-    });
-
-    state = selectionReducer(state, {
-      type: 'POINTER_MOVE',
-      point: { x: 960, y: 540 },
-    });
-
-    expect(state.currentRect).toEqual({
-      x: 960 - 400, // 560
-      y: 540 - 300, // 240
-      width: 800,
-      height: 600,
-    });
-
-    state = selectionReducer(state, {
-      type: 'POINTER_UP',
-    });
-    expect(state.status).toBe('completed');
-    expect(state.lastCompletedRegion).toEqual({
-      x: 560,
-      y: 240,
-      width: 800,
-      height: 600,
-    });
-  });
-
-  it('clamps fixed selection to display edges', () => {
-    let state = initialSelectionState({
-      mode: 'fixed_size',
-      fixedSize: { width: 800, height: 600 },
-      displayBounds: defaultDisplay,
-    });
-
-    // Move to near top-left: should clamp to (0, 0)
-    state = selectionReducer(state, {
-      type: 'POINTER_MOVE',
-      point: { x: 100, y: 100 },
-    });
-    expect(state.currentRect).toEqual({
-      x: 0,
-      y: 0,
-      width: 800,
-      height: 600,
-    });
-
-    // Move to near bottom-right: should clamp to (1920 - 800, 1080 - 600) = (1120, 480)
-    state = selectionReducer(state, {
-      type: 'POINTER_MOVE',
-      point: { x: 1900, y: 1050 },
-    });
-    expect(state.currentRect).toEqual({
-      x: 1120,
+    const physical = logicalToPhysical(localLogical, leftDisplay);
+    expect(physical).toEqual({
+      x: -2360,
       y: 480,
       width: 800,
       height: 600,
     });
-  });
+    expect(physicalToLogical(physical, leftDisplay)).toEqual(localLogical);
 
-  it('clamps fixed size if display is smaller than requested dimensions', () => {
-    const smallDisplay: DisplayBounds = {
-      x: 0,
-      y: 0,
-      width: 640,
-      height: 480,
-      scaleFactor: 1.0,
+    const fractionalDisplay: DisplayBounds = {
+      x: -1920,
+      y: -1080,
+      width: 2880,
+      height: 1620,
+      scaleFactor: 1.5,
     };
-    let state = initialSelectionState({
-      mode: 'fixed_size',
-      fixedSize: { width: 800, height: 600 },
-      displayBounds: smallDisplay,
-    });
-
-    state = selectionReducer(state, {
-      type: 'POINTER_MOVE',
-      point: { x: 300, y: 200 },
-    });
-    expect(state.currentRect).toEqual({
-      x: 0,
-      y: 0,
-      width: 640,
-      height: 480,
-    });
-  });
-
-  it('converts between logical and physical coordinates according to scaleFactor', () => {
-    const logicalRect: Rect = { x: 100, y: 150, width: 400, height: 300 };
-    const scaleFactor = 1.5;
-
-    const physical = logicalToPhysical(logicalRect, scaleFactor);
-    expect(physical).toEqual({
-      x: 150,
-      y: 225,
-      width: 600,
-      height: 450,
-    });
-
-    const restoredLogical = physicalToLogical(physical, scaleFactor);
-    expect(restoredLogical).toEqual(logicalRect);
+    const nonDivisiblePhysical: Rect = {
+      x: -1819,
+      y: -979,
+      width: 801,
+      height: 601,
+    };
+    expect(
+      logicalToPhysical(
+        physicalToLogical(nonDivisiblePhysical, fractionalDisplay),
+        fractionalDisplay
+      )
+    ).toEqual(nonDivisiblePhysical);
   });
 });
