@@ -1,1 +1,63 @@
 .worktrees/
+
+# Node and frontend output
+node_modules/
+dist/
+.vite/
+.turbo/
+.parcel-cache/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Rust and Tauri output
+target/
+**/target/
+*.msi
+*.msix
+*.exe
+*.app
+*.dmg
+*.AppImage
+*.deb
+*.rpm
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.cer
+*.crt
+*.mobileprovision
+signing/
+notarization/
+
+# Editors and operating systems
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# REA raw captures and proprietary/recovered material
+research/rea/captures/
+research/rea/raw/
+research/rea/artifacts/
+research/rea/dumps/
+research/rea/samples/
+research/rea/proprietary/
+research/**/*-recovered.*
+research/**/*.dll
+research/**/*.dylib
+research/**/*.so
+research/**/*.bin
+research/**/*.pak
