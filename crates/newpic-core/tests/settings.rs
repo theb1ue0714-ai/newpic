@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -132,6 +132,41 @@ fn validation_enforces_sequence_width_and_jpeg_quality_bounds() {
 
     settings.save.jpeg_quality = 100;
     assert_eq!(settings.validate(), Ok(()));
+}
+
+#[test]
+fn validation_rejects_unsafe_custom_save_directories() {
+    let paths = [
+        PathBuf::new(),
+        PathBuf::from("captures"),
+        PathBuf::from("../captures"),
+        std::env::temp_dir().join("..").join("captures"),
+        std::env::temp_dir().join("bad\npath"),
+    ];
+    for path in paths {
+        let mut settings = Settings::default();
+        settings.save.directory = SaveDirectory::Custom(path.clone());
+        assert!(
+            settings.validate().is_err(),
+            "custom save path {path:?} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn validation_accepts_a_normal_absolute_custom_save_directory() {
+    let mut settings = Settings::default();
+    settings.save.directory = SaveDirectory::Custom(std::env::temp_dir().join("NewPic captures"));
+
+    assert_eq!(settings.validate(), Ok(()));
+}
+
+#[test]
+fn repeated_source_changes_report_general_settings_loading() {
+    assert_eq!(
+        LoadSettingsError::ConcurrentModification.to_string(),
+        "settings changed repeatedly during loading"
+    );
 }
 
 #[test]

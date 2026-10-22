@@ -83,6 +83,10 @@ impl Settings {
             ));
         }
 
+        if let SaveDirectory::Custom(path) = &self.save.directory {
+            validate_custom_save_directory(path)?;
+        }
+
         Ok(())
     }
 }
@@ -211,6 +215,38 @@ pub enum SettingsValidationError {
     InvalidMinimumWidth(u8),
     #[error("JPEG quality must be in the range 1 through 100, got {0}")]
     InvalidJpegQuality(u8),
+    #[error("custom save directory cannot be empty")]
+    EmptyCustomSaveDirectory,
+    #[error("custom save directory must be absolute: {0}")]
+    CustomSaveDirectoryMustBeAbsolute(PathBuf),
+    #[error("custom save directory contains unsafe path components: {0}")]
+    UnsafeCustomSaveDirectory(PathBuf),
+}
+
+fn validate_custom_save_directory(path: &Path) -> Result<(), SettingsValidationError> {
+    use std::path::Component;
+
+    if path.as_os_str().is_empty() {
+        return Err(SettingsValidationError::EmptyCustomSaveDirectory);
+    }
+    if !path.is_absolute() {
+        return Err(SettingsValidationError::CustomSaveDirectoryMustBeAbsolute(
+            path.to_path_buf(),
+        ));
+    }
+    let text = path
+        .to_str()
+        .ok_or_else(|| SettingsValidationError::UnsafeCustomSaveDirectory(path.to_path_buf()))?;
+    if text.chars().any(char::is_control)
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    {
+        return Err(SettingsValidationError::UnsafeCustomSaveDirectory(
+            path.to_path_buf(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_naming_pattern(pattern: &str) -> Result<(), SettingsValidationError> {
@@ -573,7 +609,7 @@ pub enum LoadSettingsError {
     Repository(#[from] SettingsRepositoryError),
     #[error(transparent)]
     Migration(#[from] SettingsMigrationError),
-    #[error("settings changed repeatedly during corruption recovery")]
+    #[error("settings changed repeatedly during loading")]
     ConcurrentModification,
 }
 
