@@ -68,6 +68,12 @@ fn path_separators_dot_names_controls_and_platform_invalid_names_are_rejected() 
         "nul",
         "COM1",
         "LPT9.txt",
+        "COM¹",
+        "com².txt",
+        "CoM³",
+        "LPT¹",
+        "lpt².log",
+        "LpT³",
         "   ",
     ];
 

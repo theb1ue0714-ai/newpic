@@ -170,15 +170,7 @@ fn validate_portable_filename(filename: &str) -> Result<(), NamingError> {
         || filename == ".."
         || filename.ends_with(['.', ' '])
         || filename.len() > MAX_PORTABLE_FILENAME_BYTES;
-    let stem = filename
-        .split('.')
-        .next()
-        .unwrap_or(filename)
-        .trim_end_matches(['.', ' '])
-        .to_ascii_uppercase();
-    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || reserved_numbered_name(&stem, "COM")
-        || reserved_numbered_name(&stem, "LPT");
+    let reserved = is_windows_reserved_component(filename);
 
     if invalid_character || invalid_shape || reserved {
         return Err(NamingError::InvalidFilename(filename.to_owned()));
@@ -190,8 +182,23 @@ fn validate_portable_filename(filename: &str) -> Result<(), NamingError> {
 /// independently and never prepend text to this target filename.
 pub const MAX_PORTABLE_FILENAME_BYTES: usize = 255;
 
+pub(crate) fn is_windows_reserved_component(component: &str) -> bool {
+    let stem = component
+        .split('.')
+        .next()
+        .unwrap_or(component)
+        .trim_end_matches(['.', ' '])
+        .to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || reserved_numbered_name(&stem, "COM")
+        || reserved_numbered_name(&stem, "LPT")
+}
+
 fn reserved_numbered_name(stem: &str, prefix: &str) -> bool {
-    stem.strip_prefix(prefix)
-        .and_then(|suffix| suffix.parse::<u8>().ok())
-        .is_some_and(|number| (1..=9).contains(&number))
+    stem.strip_prefix(prefix).is_some_and(|suffix| {
+        matches!(suffix, "¹" | "²" | "³")
+            || suffix
+                .parse::<u8>()
+                .is_ok_and(|number| (1..=9).contains(&number))
+    })
 }

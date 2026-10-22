@@ -330,30 +330,12 @@ fn validate_windows_save_directory(path: &str) -> Result<(), SettingsValidationE
                 character.is_control()
                     || matches!(character, '<' | '>' | ':' | '"' | '|' | '?' | '*')
             })
-            || is_windows_reserved_component(component)
+            || crate::naming::is_windows_reserved_component(component)
         {
             return Err(rejected());
         }
     }
     Ok(())
-}
-
-fn is_windows_reserved_component(component: &str) -> bool {
-    let stem = component
-        .split('.')
-        .next()
-        .unwrap_or(component)
-        .trim_end_matches(['.', ' '])
-        .to_ascii_uppercase();
-    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || windows_numbered_device(&stem, "COM")
-        || windows_numbered_device(&stem, "LPT")
-}
-
-fn windows_numbered_device(stem: &str, prefix: &str) -> bool {
-    stem.strip_prefix(prefix)
-        .and_then(|suffix| suffix.parse::<u8>().ok())
-        .is_some_and(|number| (1..=9).contains(&number))
 }
 
 fn validate_naming_pattern(pattern: &str) -> Result<(), SettingsValidationError> {
