@@ -341,31 +341,32 @@ impl SavedFixedRegion {
 
     pub fn resolve(&self, current: &[Display]) -> Result<PhysicalRect, GeometryError> {
         ensure_unique_display_ids(current)?;
-        if current
+        if let Some(display) = current
             .iter()
-            .any(|display| DisplayFingerprint::from(display) == self.display)
+            .find(|display| DisplayFingerprint::from(*display) == self.display)
         {
-            return Ok(self.rect);
+            return region_on_selected_display(self.rect, display);
         }
 
         let primary = unique_primary_display(current)?;
-        centered_rect(self.rect.size(), primary.bounds())
+        let rect = centered_rect(self.rect.size(), primary.bounds())?;
+        region_on_selected_display(rect, primary)
     }
 
-    /// Applies a Settings size edit. On an unchanged display the stored
-    /// top-left is retained when possible and moved only as far as necessary
-    /// to fit. After a topology change, the resolved primary-display position
-    /// becomes the new anchor.
+    /// Applies a Settings size edit. While the stable display ID remains, the
+    /// stored top-left is retained when possible and moved only as far as
+    /// necessary to fit its current bounds. If that display disappears, the
+    /// resolved primary-display position becomes the new anchor.
     pub fn with_size(
         &self,
         size: PhysicalSize,
         displays: &[Display],
     ) -> Result<Self, GeometryError> {
         ensure_unique_display_ids(displays)?;
-        let matching = displays
+        let matching_id = displays
             .iter()
-            .find(|display| DisplayFingerprint::from(*display) == self.display);
-        let (display, origin) = match matching {
+            .find(|display| display.id() == &self.display.id);
+        let (display, origin) = match matching_id {
             Some(display) => (display, self.rect.origin()),
             None => {
                 let display = unique_primary_display(displays)?;
@@ -373,6 +374,7 @@ impl SavedFixedRegion {
             }
         };
         let rect = clamp_rect(origin, size, display.bounds())?;
+        let rect = region_on_selected_display(rect, display)?;
 
         Ok(Self {
             rect,
@@ -670,6 +672,17 @@ fn rect_is_contained_by(rect: PhysicalRect, bounds: PhysicalRect) -> bool {
         && rect.top() >= bounds.top()
         && rect.right() <= bounds.right()
         && rect.bottom() <= bounds.bottom()
+}
+
+fn region_on_selected_display(
+    rect: PhysicalRect,
+    display: &Display,
+) -> Result<PhysicalRect, GeometryError> {
+    if rect_is_contained_by(rect, display.bounds()) {
+        Ok(rect)
+    } else {
+        Err(GeometryError::RegionNotContainedBySingleDisplay)
+    }
 }
 
 fn centered_rect(size: PhysicalSize, bounds: PhysicalRect) -> Result<PhysicalRect, GeometryError> {

@@ -152,6 +152,147 @@ fn saved_fixed_region_with_size_preserves_or_clamps_top_left() {
 }
 
 #[test]
+fn saved_fixed_region_with_size_keeps_stable_display_after_scale_change() {
+    let original = display("external", -1280, 0, 1280, 1024, 1.0);
+    let saved = SavedFixedRegion::capture(
+        PhysicalRect::new(-1100, 100, 500, 400).unwrap(),
+        std::slice::from_ref(&original),
+    )
+    .unwrap();
+    let current = vec![
+        primary_display("main", 0, 0, 1920, 1080, 1.0),
+        Display::new(
+            original.id().clone(),
+            original.bounds(),
+            ScaleFactor::new(1.25).unwrap(),
+            false,
+            original.orientation(),
+        ),
+    ];
+
+    let resized = saved
+        .with_size(PhysicalSize::new(600, 450).unwrap(), &current)
+        .unwrap();
+
+    assert_eq!(
+        resized.rect(),
+        PhysicalRect::new(-1100, 100, 600, 450).unwrap()
+    );
+    assert_eq!(resized.resolve(&current).unwrap(), resized.rect());
+}
+
+#[test]
+fn saved_fixed_region_with_size_keeps_stable_display_after_orientation_change() {
+    let original = display("external", -1280, 0, 1280, 1024, 1.0);
+    let saved = SavedFixedRegion::capture(
+        PhysicalRect::new(-1100, 100, 500, 400).unwrap(),
+        std::slice::from_ref(&original),
+    )
+    .unwrap();
+    let current = vec![
+        primary_display("main", 0, 0, 1920, 1080, 1.0),
+        Display::new(
+            original.id().clone(),
+            original.bounds(),
+            original.scale_factor(),
+            false,
+            DisplayOrientation::LandscapeFlipped,
+        ),
+    ];
+
+    let resized = saved
+        .with_size(PhysicalSize::new(600, 450).unwrap(), &current)
+        .unwrap();
+
+    assert_eq!(
+        resized.rect(),
+        PhysicalRect::new(-1100, 100, 600, 450).unwrap()
+    );
+    assert_eq!(resized.resolve(&current).unwrap(), resized.rect());
+}
+
+#[test]
+fn saved_fixed_region_with_size_clamps_stable_display_after_bounds_change() {
+    let original = display("external", -1280, 0, 1280, 1024, 1.0);
+    let saved = SavedFixedRegion::capture(
+        PhysicalRect::new(-1200, 80, 500, 400).unwrap(),
+        std::slice::from_ref(&original),
+    )
+    .unwrap();
+    let current = vec![
+        primary_display("main", 0, 0, 1920, 1080, 1.0),
+        display("external", -1000, 50, 900, 700, 1.0),
+    ];
+
+    let resized = saved
+        .with_size(PhysicalSize::new(850, 650).unwrap(), &current)
+        .unwrap();
+
+    assert_eq!(
+        resized.rect(),
+        PhysicalRect::new(-1000, 80, 850, 650).unwrap()
+    );
+    assert_eq!(resized.resolve(&current).unwrap(), resized.rect());
+}
+
+#[test]
+fn saved_fixed_region_results_remain_keyed_to_selected_display_with_a_new_mirror() {
+    let original = primary_display("selected", 0, 0, 1000, 800, 1.0);
+    let saved = SavedFixedRegion::capture(
+        PhysicalRect::new(100, 80, 500, 400).unwrap(),
+        std::slice::from_ref(&original),
+    )
+    .unwrap();
+    let current = vec![original, display("mirror", 0, 0, 1000, 800, 1.0)];
+
+    assert_eq!(
+        saved.resolve(&current).unwrap(),
+        PhysicalRect::new(100, 80, 500, 400).unwrap()
+    );
+
+    let resized = saved
+        .with_size(PhysicalSize::new(700, 600).unwrap(), &current)
+        .unwrap();
+    assert_eq!(
+        resized.rect(),
+        PhysicalRect::new(100, 80, 700, 600).unwrap()
+    );
+    assert_eq!(resized.resolve(&current).unwrap(), resized.rect());
+}
+
+#[test]
+fn saved_fixed_region_reports_exact_primary_topology_errors() {
+    let saved = SavedFixedRegion::capture(
+        PhysicalRect::new(-900, 100, 600, 400).unwrap(),
+        &[display("removed", -1280, 0, 1280, 1024, 1.0)],
+    )
+    .unwrap();
+    let size = PhysicalSize::new(800, 600).unwrap();
+
+    assert_eq!(
+        saved.resolve(&[]),
+        Err(newpic_platform::geometry::GeometryError::PrimaryDisplayUnavailable)
+    );
+    assert_eq!(
+        saved.with_size(size, &[]),
+        Err(newpic_platform::geometry::GeometryError::PrimaryDisplayUnavailable)
+    );
+
+    let two_primaries = vec![
+        primary_display("one", 0, 0, 1000, 800, 1.0),
+        primary_display("two", 1000, 0, 1000, 800, 1.0),
+    ];
+    assert_eq!(
+        saved.resolve(&two_primaries),
+        Err(newpic_platform::geometry::GeometryError::MultiplePrimaryDisplays)
+    );
+    assert_eq!(
+        saved.with_size(size, &two_primaries),
+        Err(newpic_platform::geometry::GeometryError::MultiplePrimaryDisplays)
+    );
+}
+
+#[test]
 fn saved_fixed_region_serialization_round_trip_preserves_validated_geometry() {
     let displays = vec![primary_display("left", -1920, -200, 1920, 1080, 1.25)];
     let saved =
