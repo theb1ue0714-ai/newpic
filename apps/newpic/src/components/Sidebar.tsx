@@ -1,0 +1,3 @@
+export type Section="general"|"capture"|"save"|"filename"|"shortcuts"|"diagnostics";
+const items:[Section,string][]=[["general","일반"],["capture","캡처"],["save","저장"],["filename","파일 이름"],["shortcuts","단축키"],["diagnostics","진단"]];
+export function Sidebar({active,onSelect}:{active:Section;onSelect:(s:Section)=>void}){return <aside className="sidebar"><div className="brand"><b>NP</b><strong>NewPic</strong></div><nav aria-label="설정 섹션">{items.map(([id,label])=><button type="button" key={id} className={active===id?"active":""} aria-current={active===id?"page":undefined} onClick={()=>onSelect(id)}>{label}</button>)}</nav><small>로컬 전용 화면 캡처</small></aside>}

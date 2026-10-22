@@ -1,0 +1,10 @@
+import { invoke } from "@tauri-apps/api/core";
+export type Action="region"|"repeat_region"|"fixed_region"|"active_window";
+export interface Settings{schema_version:number;autostart:boolean;run_in_tray:boolean;success_notifications:boolean;language:"korean"|"english";include_pointer:boolean;open_editor_after_capture:boolean;check_updates:boolean;save:{enabled:boolean;directory:"downloads_new_pic"|{custom:string};format:"png"|"jpeg";jpeg_quality:number};naming:{pattern:string;minimum_width:number};clipboard:{enabled:boolean};fixed_region:{width:number;height:number};hotkeys:Record<Action,string>}
+export type Reg={action:Action;label:string;status:{state:"registered";accelerator:string}|{state:"failed";accelerator:string;reason:string}};
+export type Auto={state:"unknown"}|{state:"in_sync";enabled:boolean}|{state:"failed";desired:boolean;reason:string};
+export interface Diagnostics{os:string;session:string|null;capture:{backend:string;capabilities:Array<{operation:string;state:"supported"|"limited"|"unsupported";reason:string|null;hint:string|null}>};hotkeys:Reg[];autostart:Auto;destination:{path:string;state:"writable"|"will_be_created"|"not_writable";reason?:string};settings_notice:string|null;events:Array<{sequence:number;level:string;message:string}>}
+export interface Response{settings:Settings;hotkeys:Reg[];rejected_shortcuts:Array<{action:Action;message:string}>;autostart:Auto}
+export interface NewPicApi{getSettings():Promise<Settings>;saveSettings(v:Settings):Promise<Response>;applyDefaultPreset():Promise<Response>;getDiagnostics():Promise<Diagnostics>;openPermissionSettings():Promise<boolean>}
+export const newPicApi:NewPicApi={getSettings:()=>invoke("get_settings"),saveSettings:(settings)=>invoke("save_settings",{settings}),applyDefaultPreset:()=>invoke("apply_default_preset"),getDiagnostics:()=>invoke("get_diagnostics"),openPermissionSettings:()=>invoke("open_permission_settings")};
+export const errorMessage=(e:unknown)=>typeof e==="object"&&e!==null&&"message" in e?String((e as {message:unknown}).message):String(e);

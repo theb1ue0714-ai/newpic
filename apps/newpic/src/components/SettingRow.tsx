@@ -1,0 +1,3 @@
+import type{ReactNode}from"react";
+export function SettingRow({label,description,htmlFor,children}:{label:string;description?:string;htmlFor?:string;children:ReactNode}){return <div className="setting-row"><div>{htmlFor?<label htmlFor={htmlFor}>{label}</label>:<strong>{label}</strong>}{description&&<p>{description}</p>}</div><div>{children}</div></div>}
+export function Switch({label,checked,onChange}:{label:string;checked:boolean;onChange:(v:boolean)=>void}){return <label className="switch"><input type="checkbox" aria-label={label} checked={checked} onChange={e=>onChange(e.target.checked)}/><span/></label>}
