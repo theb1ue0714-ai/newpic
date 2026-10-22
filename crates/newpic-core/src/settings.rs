@@ -5,10 +5,11 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
+use newpic_platform::geometry::SavedFixedRegion;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 const MAX_SOURCE_CHANGES: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +26,7 @@ pub struct Settings {
     pub naming: NamingSettings,
     pub clipboard: ClipboardSettings,
     pub fixed_region: Size,
+    pub saved_fixed_region: Option<SavedFixedRegion>,
     pub hotkeys: Hotkeys,
 }
 
@@ -43,6 +45,7 @@ impl Default for Settings {
             naming: NamingSettings::default(),
             clipboard: ClipboardSettings::default(),
             fixed_region: Size::new(800, 600),
+            saved_fixed_region: None,
             hotkeys: Hotkeys::default(),
         }
     }
@@ -393,6 +396,23 @@ struct SchemaZeroSettings {
     active_window_hotkey: String,
 }
 
+#[derive(Deserialize)]
+struct SchemaOneSettings {
+    schema_version: u32,
+    autostart: bool,
+    run_in_tray: bool,
+    success_notifications: bool,
+    language: Language,
+    include_pointer: bool,
+    open_editor_after_capture: bool,
+    check_updates: bool,
+    save: SaveSettings,
+    naming: NamingSettings,
+    clipboard: ClipboardSettings,
+    fixed_region: Size,
+    hotkeys: Hotkeys,
+}
+
 pub fn migrate_json(json: &str) -> Result<Settings, SettingsMigrationError> {
     decode_json(json).map(|decoded| decoded.settings)
 }
@@ -406,11 +426,32 @@ fn decode_json(json: &str) -> Result<DecodedSettings, SettingsMigrationError> {
     let envelope: SchemaEnvelope = serde_json::from_str(json)?;
     let (settings, migrated) = match envelope.schema_version {
         0 => (migrate_schema_zero(serde_json::from_str(json)?), true),
-        1 => (serde_json::from_str(json)?, false),
+        1 => (migrate_schema_one(serde_json::from_str(json)?), true),
+        2 => (serde_json::from_str(json)?, false),
         version => return Err(SettingsMigrationError::UnsupportedSchema(version)),
     };
     settings.validate()?;
     Ok(DecodedSettings { settings, migrated })
+}
+
+fn migrate_schema_one(old: SchemaOneSettings) -> Settings {
+    debug_assert_eq!(old.schema_version, 1);
+    Settings {
+        schema_version: CURRENT_SCHEMA_VERSION,
+        autostart: old.autostart,
+        run_in_tray: old.run_in_tray,
+        success_notifications: old.success_notifications,
+        language: old.language,
+        include_pointer: old.include_pointer,
+        open_editor_after_capture: old.open_editor_after_capture,
+        check_updates: old.check_updates,
+        save: old.save,
+        naming: old.naming,
+        clipboard: old.clipboard,
+        fixed_region: old.fixed_region,
+        saved_fixed_region: None,
+        hotkeys: old.hotkeys,
+    }
 }
 
 fn migrate_schema_zero(old: SchemaZeroSettings) -> Settings {

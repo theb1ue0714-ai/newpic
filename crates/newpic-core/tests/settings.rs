@@ -11,12 +11,15 @@ use newpic_core::settings::{
     SaveDirectory, SavePathPlatform, Settings, SettingsMigrationError, SettingsRepository,
     SettingsRepositoryError, SettingsValidationError, Size, CURRENT_SCHEMA_VERSION,
 };
+use newpic_platform::geometry::{
+    Display, DisplayId, DisplayOrientation, PhysicalRect, SavedFixedRegion, ScaleFactor,
+};
 
 #[test]
 fn default_preset_matches_every_approved_design_value() {
     let value = Settings::default();
 
-    assert_eq!(value.schema_version, 1);
+    assert_eq!(value.schema_version, 2);
     assert_eq!(value.schema_version, CURRENT_SCHEMA_VERSION);
     assert!(value.autostart);
     assert!(value.run_in_tray);
@@ -31,6 +34,7 @@ fn default_preset_matches_every_approved_design_value() {
     assert!(!value.include_pointer);
     assert!(!value.check_updates);
     assert_eq!(value.fixed_region, Size::new(800, 600));
+    assert_eq!(value.saved_fixed_region, None);
     assert_eq!(value.hotkeys.region, "F7");
     assert_eq!(value.hotkeys.repeat_region, "F8");
     assert_eq!(value.hotkeys.fixed_region, "F9");
@@ -47,7 +51,97 @@ fn current_settings_are_serializable_and_round_trip_without_loss() {
     let decoded: Settings = serde_json::from_str(&json).expect("settings deserialize");
 
     assert_eq!(decoded, settings);
-    assert!(json.contains("\"schema_version\": 1"));
+    assert!(json.contains("\"schema_version\": 2"));
+}
+
+#[test]
+fn schema_one_migrates_to_persistent_f9_shape() {
+    let fixture = include_str!("fixtures/settings-schema-1.json");
+
+    let migrated = migrate_json(fixture).expect("schema one fixture migrates");
+
+    assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
+    assert_eq!(migrated.fixed_region, Size::new(740, 510));
+    assert_eq!(migrated.saved_fixed_region, None);
+    assert!(!migrated.autostart);
+    assert_eq!(migrated.language, Language::English);
+    assert_eq!(migrated.hotkeys.fixed_region, "Ctrl+Shift+9");
+}
+
+#[test]
+fn schema_two_round_trips_negative_origin_saved_fixed_region_without_loss() {
+    let display = Display::new(
+        DisplayId::new("left-display").unwrap(),
+        PhysicalRect::new(-1920, -200, 1920, 1080).unwrap(),
+        ScaleFactor::new(1.25).unwrap(),
+        true,
+        DisplayOrientation::Landscape,
+    );
+    let saved = SavedFixedRegion::capture(
+        PhysicalRect::new(-1800, -120, 740, 510).unwrap(),
+        std::slice::from_ref(&display),
+    )
+    .unwrap();
+    let settings = Settings {
+        fixed_region: Size::new(740, 510),
+        saved_fixed_region: Some(saved),
+        ..Settings::default()
+    };
+
+    let json = serde_json::to_string_pretty(&settings).expect("settings serialize");
+    let decoded = migrate_json(&json).expect("schema two settings decode");
+
+    assert_eq!(decoded, settings);
+    assert_eq!(
+        decoded.saved_fixed_region.as_ref().unwrap().rect(),
+        PhysicalRect::new(-1800, -120, 740, 510).unwrap()
+    );
+}
+
+#[test]
+fn invalid_saved_fixed_region_geometry_uses_corrupt_settings_recovery() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let path = temp.path().join("settings.json");
+    let mut invalid =
+        serde_json::to_value(settings_with_saved_fixed_region()).expect("settings JSON value");
+    invalid["saved_fixed_region"]["rect"]["width"] = serde_json::json!(0);
+    let invalid_json = serde_json::to_string_pretty(&invalid).expect("invalid settings JSON");
+    fs::write(&path, &invalid_json).expect("write invalid geometry");
+
+    let outcome = load_or_recover(&JsonFileSettingsRepository::new(&path))
+        .expect("invalid geometry recovers to defaults");
+    let backup = temp.path().join("settings.corrupt.json");
+
+    assert_eq!(outcome.settings, Settings::default());
+    assert_eq!(
+        outcome.notice,
+        Some(RecoveryNotice::CorruptedSettings {
+            backup_path: backup.clone()
+        })
+    );
+    assert_eq!(fs::read_to_string(backup).unwrap(), invalid_json);
+}
+
+#[test]
+fn reapplying_default_preset_clears_saved_f9_geometry_without_removing_images() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let settings_path = temp.path().join("settings.json");
+    let captured_image = temp.path().join("001.png");
+    let image_bytes = b"independent captured image";
+    fs::write(&captured_image, image_bytes).expect("write captured image");
+    let repository = JsonFileSettingsRepository::new(&settings_path);
+    repository
+        .save(&settings_with_saved_fixed_region())
+        .expect("save customized settings");
+
+    repository
+        .save(&Settings::default())
+        .expect("reapply default settings");
+
+    let reset = read_settings(&settings_path);
+    assert_eq!(reset.fixed_region, Size::new(800, 600));
+    assert_eq!(reset.saved_fixed_region, None);
+    assert_eq!(fs::read(captured_image).unwrap(), image_bytes);
 }
 
 #[test]
@@ -261,6 +355,7 @@ fn schema_zero_fixture_migrates_values_and_adds_current_defaults() {
     );
     assert_eq!(migrated.clipboard, ClipboardSettings { enabled: false });
     assert_eq!(migrated.fixed_region, Size::new(640, 480));
+    assert_eq!(migrated.saved_fixed_region, None);
     assert_eq!(
         migrated.hotkeys,
         Hotkeys {
@@ -358,7 +453,7 @@ fn current_schema_load_is_read_only_and_preserves_unknown_fields() {
 fn future_schema_is_preserved_without_save_or_backup() {
     let temp = tempfile::tempdir().expect("temporary directory");
     let path = temp.path().join("settings.json");
-    let original = r#"{"schema_version":2,"future":"untouched"}"#;
+    let original = r#"{"schema_version":3,"future":"untouched"}"#;
     fs::write(&path, original).expect("write future settings");
 
     let result = load_or_recover(&JsonFileSettingsRepository::new(&path));
@@ -366,7 +461,7 @@ fn future_schema_is_preserved_without_save_or_backup() {
     assert!(matches!(
         result,
         Err(LoadSettingsError::Migration(
-            SettingsMigrationError::UnsupportedSchema(2)
+            SettingsMigrationError::UnsupportedSchema(3)
         ))
     ));
     assert_eq!(
@@ -390,7 +485,7 @@ fn schema_zero_is_persisted_only_after_successful_migration() {
     assert_eq!(read_settings(&path), outcome.settings);
     assert!(fs::read_to_string(&path)
         .expect("read migrated settings")
-        .contains("\"schema_version\": 1"));
+        .contains("\"schema_version\": 2"));
 }
 
 #[test]
@@ -743,6 +838,23 @@ impl SettingsRepository for ChurningRepository {
 }
 
 fn assert_repository<R: SettingsRepository>(_repository: &R) {}
+
+fn settings_with_saved_fixed_region() -> Settings {
+    let display = Display::new(
+        DisplayId::new("main").unwrap(),
+        PhysicalRect::new(0, 0, 1920, 1080).unwrap(),
+        ScaleFactor::new(1.0).unwrap(),
+        true,
+        DisplayOrientation::Landscape,
+    );
+    let saved_fixed_region =
+        SavedFixedRegion::capture(PhysicalRect::new(200, 120, 800, 600).unwrap(), &[display])
+            .unwrap();
+    Settings {
+        saved_fixed_region: Some(saved_fixed_region),
+        ..Settings::default()
+    }
+}
 
 fn read_settings(path: &Path) -> Settings {
     let json = fs::read_to_string(path).expect("read persisted settings");

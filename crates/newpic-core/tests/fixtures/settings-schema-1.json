@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "autostart": false,
+  "run_in_tray": true,
+  "success_notifications": false,
+  "language": "english",
+  "include_pointer": true,
+  "open_editor_after_capture": false,
+  "check_updates": true,
+  "save": {
+    "enabled": true,
+    "directory": "downloads_new_pic",
+    "format": "png",
+    "jpeg_quality": 88
+  },
+  "naming": {
+    "pattern": "capture-%c",
+    "minimum_width": 4
+  },
+  "clipboard": {
+    "enabled": false
+  },
+  "fixed_region": {
+    "width": 740,
+    "height": 510
+  },
+  "hotkeys": {
+    "region": "Ctrl+Shift+7",
+    "repeat_region": "Ctrl+Shift+8",
+    "fixed_region": "Ctrl+Shift+9",
+    "active_window": "Ctrl+Shift+0"
+  }
+}

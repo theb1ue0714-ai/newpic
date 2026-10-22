@@ -13,7 +13,10 @@ required_rust_coverage=(
   'value.naming.pattern' 'value.naming.minimum_width'
   'value.clipboard.enabled' 'value.open_editor_after_capture'
   'value.success_notifications' 'value.include_pointer' 'value.check_updates'
-  'Size::new(800, 600)' 'value.hotkeys.region' 'value.hotkeys.repeat_region'
+  'Size::new(800, 600)' 'value.saved_fixed_region, None'
+  'schema_one_migrates_to_persistent_f9_shape'
+  'include_str!("fixtures/settings-schema-1.json")'
+  'value.hotkeys.region' 'value.hotkeys.repeat_region'
   'value.hotkeys.fixed_region' 'value.hotkeys.active_window' 'Language::Korean'
 )
 required_ui_coverage=(
