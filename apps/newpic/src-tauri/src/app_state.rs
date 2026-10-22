@@ -19,6 +19,7 @@ use newpic_platform::capture::{
     CaptureOptions, CaptureProvider, CaptureRequest, CaptureSource, CapturedImage,
 };
 use newpic_platform::clipboard::ImageClipboard;
+use newpic_platform::geometry::{Display, GeometryError, PhysicalRect, PhysicalSize};
 use serde::{Deserialize, Serialize};
 
 use crate::autostart::AutostartStatus;
@@ -63,6 +64,33 @@ pub enum SelectionMode {
     FixedSize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhysicalRectDto {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl TryFrom<PhysicalRectDto> for PhysicalRect {
+    type Error = GeometryError;
+
+    fn try_from(dto: PhysicalRectDto) -> Result<Self, Self::Error> {
+        PhysicalRect::new(dto.x, dto.y, dto.width, dto.height)
+    }
+}
+
+impl From<PhysicalRect> for PhysicalRectDto {
+    fn from(rect: PhysicalRect) -> Self {
+        Self {
+            x: rect.origin().x,
+            y: rect.origin().y,
+            width: rect.size().width(),
+            height: rect.size().height(),
+        }
+    }
+}
+
 /// Payload sent to the selection overlay.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectionRequest {
@@ -71,6 +99,8 @@ pub struct SelectionRequest {
     pub fixed_size: Option<Size>,
     /// Set when F8 had no reusable region and fell back to F7 selection.
     pub fallback_from: Option<CaptureAction>,
+    /// Global physical rectangle restored for F9 before windows are opened.
+    pub initial_rect: Option<PhysicalRectDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,28 +114,61 @@ pub enum CapturePlan {
 /// Decides how an action starts. Saved F8 regions are persisted once the
 /// selection overlay exists; until one is available F8 opens F7 selection,
 /// as the approved specification requires.
-pub fn plan_capture(action: CaptureAction, settings: &Settings) -> CapturePlan {
-    match action {
+pub fn plan_capture(
+    action: CaptureAction,
+    settings: &Settings,
+    displays: &[Display],
+) -> Result<CapturePlan, GeometryError> {
+    Ok(match action {
         CaptureAction::ActiveWindow => CapturePlan::Direct(CaptureSource::ActiveWindow),
         CaptureAction::Region => CapturePlan::Select(SelectionRequest {
             action,
             mode: SelectionMode::FreeRegion,
             fixed_size: None,
             fallback_from: None,
+            initial_rect: None,
         }),
         CaptureAction::RepeatRegion => CapturePlan::Select(SelectionRequest {
             action: CaptureAction::Region,
             mode: SelectionMode::FreeRegion,
             fixed_size: None,
             fallback_from: Some(CaptureAction::RepeatRegion),
+            initial_rect: None,
         }),
-        CaptureAction::FixedRegion => CapturePlan::Select(SelectionRequest {
-            action,
-            mode: SelectionMode::FixedSize,
-            fixed_size: Some(settings.fixed_region),
-            fallback_from: None,
-        }),
+        CaptureAction::FixedRegion => {
+            let initial_rect = match &settings.saved_fixed_region {
+                Some(saved) => saved.resolve(displays)?,
+                None => centered_fixed_rect(settings.fixed_region, displays)?,
+            };
+            CapturePlan::Select(SelectionRequest {
+                action,
+                mode: SelectionMode::FixedSize,
+                fixed_size: Some(settings.fixed_region),
+                fallback_from: None,
+                initial_rect: Some(initial_rect.into()),
+            })
+        }
+    })
+}
+
+fn centered_fixed_rect(size: Size, displays: &[Display]) -> Result<PhysicalRect, GeometryError> {
+    let mut primary = displays.iter().filter(|display| display.is_primary());
+    let display = primary
+        .next()
+        .ok_or(GeometryError::PrimaryDisplayUnavailable)?;
+    if primary.next().is_some() {
+        return Err(GeometryError::MultiplePrimaryDisplays);
     }
+    let bounds = display.bounds();
+    let width = size.width.min(bounds.size().width());
+    let height = size.height.min(bounds.size().height());
+    let x = bounds.left() + i64::from(bounds.size().width() - width) / 2;
+    let y = bounds.top() + i64::from(bounds.size().height() - height) / 2;
+    PhysicalRect::from_origin_size(
+        i32::try_from(x).map_err(|_| GeometryError::CoordinateOutOfRange)?,
+        i32::try_from(y).map_err(|_| GeometryError::CoordinateOutOfRange)?,
+        PhysicalSize::new(width, height)?,
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -382,16 +445,30 @@ mod tests {
     #[test]
     fn actions_plan_direct_capture_or_selection() {
         let settings = Settings::default();
+        let displays = vec![Display::new(
+            newpic_platform::geometry::DisplayId::new("main").unwrap(),
+            PhysicalRect::new(0, 0, 1920, 1080).unwrap(),
+            newpic_platform::geometry::ScaleFactor::new(1.0).unwrap(),
+            true,
+            newpic_platform::geometry::DisplayOrientation::Landscape,
+        )];
         assert_eq!(
-            plan_capture(CaptureAction::ActiveWindow, &settings),
-            CapturePlan::Direct(CaptureSource::ActiveWindow)
+            plan_capture(CaptureAction::ActiveWindow, &settings, &displays).unwrap(),
+            CapturePlan::Direct(CaptureSource::ActiveWindow),
         );
-        let CapturePlan::Select(fixed) = plan_capture(CaptureAction::FixedRegion, &settings) else {
+        let CapturePlan::Select(fixed) =
+            plan_capture(CaptureAction::FixedRegion, &settings, &displays).unwrap()
+        else {
             panic!("fixed region needs selection");
         };
         assert_eq!(fixed.mode, SelectionMode::FixedSize);
         assert_eq!(fixed.fixed_size, Some(Size::new(800, 600)));
-        let CapturePlan::Select(repeat) = plan_capture(CaptureAction::RepeatRegion, &settings)
+        assert_eq!(
+            fixed.initial_rect,
+            Some(PhysicalRect::new(560, 240, 800, 600).unwrap().into())
+        );
+        let CapturePlan::Select(repeat) =
+            plan_capture(CaptureAction::RepeatRegion, &settings, &displays).unwrap()
         else {
             panic!("repeat falls back to selection");
         };

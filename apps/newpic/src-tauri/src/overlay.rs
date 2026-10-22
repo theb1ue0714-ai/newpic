@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tauri::{AppHandle, Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
 
@@ -7,7 +6,7 @@ use newpic_platform::geometry::{
 };
 
 use crate::app_state::AppState;
-pub use crate::app_state::{CaptureAction, SelectionMode, SelectionRequest};
+pub use crate::app_state::{CaptureAction, PhysicalRectDto, SelectionMode, SelectionRequest};
 use crate::diagnostics::EventLevel;
 
 pub const OVERLAY_WINDOW_PREFIX: &str = "overlay-";
@@ -24,40 +23,19 @@ pub enum OverlayError {
     NoActiveSelection,
     #[error("window error: {0}")]
     Window(String),
+    #[error("invalid overlay window label: {0}")]
+    InvalidWindowLabel(String),
+    #[error("overlay display index is out of range: {0}")]
+    DisplayIndexOutOfRange(usize),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PhysicalRectDto {
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-}
-
-impl TryFrom<PhysicalRectDto> for PhysicalRect {
-    type Error = GeometryError;
-
-    fn try_from(dto: PhysicalRectDto) -> Result<Self, Self::Error> {
-        PhysicalRect::new(dto.x, dto.y, dto.width, dto.height)
-    }
-}
-
-impl From<PhysicalRect> for PhysicalRectDto {
-    fn from(rect: PhysicalRect) -> Self {
-        Self {
-            x: rect.origin().x,
-            y: rect.origin().y,
-            width: rect.size().width(),
-            height: rect.size().height(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OverlayInfo {
     pub request: SelectionRequest,
     pub display_bounds: PhysicalRectDto,
     pub scale_factor: f64,
+    pub active_display: bool,
+    pub initial_rect: Option<PhysicalRectDto>,
 }
 
 #[derive(Debug, Default)]
@@ -95,10 +73,15 @@ impl OverlayCoordinator {
         // Preserves last_region for F8 repeat
     }
 
-    pub fn complete(&mut self, rect: PhysicalRect) -> Result<(), OverlayError> {
-        self.active_request = None;
-        self.last_region = Some(rect);
-        Ok(())
+    pub fn complete(&mut self, rect: PhysicalRect) -> Result<SelectionRequest, OverlayError> {
+        let request = self
+            .active_request
+            .take()
+            .ok_or(OverlayError::NoActiveSelection)?;
+        if request.action == CaptureAction::Region {
+            self.last_region = Some(rect);
+        }
+        Ok(request)
     }
 
     pub const fn last_region(&self) -> Option<PhysicalRect> {
@@ -125,8 +108,125 @@ impl OverlayCoordinator {
     }
 }
 
+fn display_contains(display: &Display, rect: PhysicalRect) -> bool {
+    display.bounds().intersection(rect) == Some(rect)
+}
+
+fn display_index_from_label(label: &str) -> Result<usize, OverlayError> {
+    let suffix = label
+        .strip_prefix(OVERLAY_WINDOW_PREFIX)
+        .ok_or_else(|| OverlayError::InvalidWindowLabel(label.to_owned()))?;
+    if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(OverlayError::InvalidWindowLabel(label.to_owned()));
+    }
+    let index: usize = suffix
+        .parse()
+        .map_err(|_| OverlayError::InvalidWindowLabel(label.to_owned()))?;
+    if label != format!("{OVERLAY_WINDOW_PREFIX}{index}") {
+        return Err(OverlayError::InvalidWindowLabel(label.to_owned()));
+    }
+    Ok(index)
+}
+
+fn active_fixed_display_index(
+    request: &SelectionRequest,
+    displays: &[Display],
+) -> Result<usize, OverlayError> {
+    let initial = request
+        .initial_rect
+        .ok_or(OverlayError::NoActiveSelection)
+        .and_then(|rect| PhysicalRect::try_from(rect).map_err(OverlayError::from))?;
+    displays
+        .iter()
+        .position(|display| display_contains(display, initial))
+        .ok_or(OverlayError::Geometry(
+            GeometryError::RegionNotContainedBySingleDisplay,
+        ))
+}
+
+pub fn overlay_info_for_label(
+    label: &str,
+    request: &SelectionRequest,
+    displays: &[Display],
+) -> Result<OverlayInfo, OverlayError> {
+    let index = display_index_from_label(label)?;
+    let display = displays
+        .get(index)
+        .ok_or(OverlayError::DisplayIndexOutOfRange(index))?;
+    let active_display = match request.mode {
+        SelectionMode::FreeRegion => true,
+        SelectionMode::FixedSize => active_fixed_display_index(request, displays)? == index,
+    };
+    Ok(OverlayInfo {
+        request: request.clone(),
+        display_bounds: display.bounds().into(),
+        scale_factor: display.scale_factor().get(),
+        active_display,
+        initial_rect: active_display.then_some(request.initial_rect).flatten(),
+    })
+}
+
+pub trait OverlayWindowFactory {
+    fn build(&mut self, label: &str, display: &Display) -> Result<(), OverlayError>;
+    fn focus(&mut self, label: &str) -> Result<(), OverlayError>;
+}
+
+pub fn create_overlay_windows(
+    request: &SelectionRequest,
+    displays: &[Display],
+    factory: &mut impl OverlayWindowFactory,
+) -> Result<(), OverlayError> {
+    for (index, display) in displays.iter().enumerate() {
+        factory.build(&format!("{OVERLAY_WINDOW_PREFIX}{index}"), display)?;
+    }
+
+    if request.mode == SelectionMode::FixedSize {
+        let active = active_fixed_display_index(request, displays)?;
+        factory.focus(&format!("{OVERLAY_WINDOW_PREFIX}{active}"))?;
+    }
+    Ok(())
+}
+
+struct TauriOverlayWindowFactory<'a, R: Runtime> {
+    app: &'a AppHandle<R>,
+}
+
+impl<R: Runtime> OverlayWindowFactory for TauriOverlayWindowFactory<'_, R> {
+    fn build(&mut self, label: &str, display: &Display) -> Result<(), OverlayError> {
+        if let Some(existing) = self.app.get_webview_window(label) {
+            let _ = existing.close();
+        }
+        let bounds = display.bounds();
+        let scale = display.scale_factor().get();
+        WebviewWindowBuilder::new(self.app, label, WebviewUrl::App("overlay.html".into()))
+            .title("NewPic Overlay")
+            .transparent(true)
+            .decorations(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .position(bounds.left() as f64 / scale, bounds.top() as f64 / scale)
+            .inner_size(
+                bounds.size().width() as f64 / scale,
+                bounds.size().height() as f64 / scale,
+            )
+            .build()
+            .map(|_| ())
+            .map_err(|error| OverlayError::Window(error.to_string()))
+    }
+
+    fn focus(&mut self, label: &str) -> Result<(), OverlayError> {
+        let window = self
+            .app
+            .get_webview_window(label)
+            .ok_or_else(|| OverlayError::Window(format!("missing built overlay {label}")))?;
+        window
+            .set_focus()
+            .map_err(|error| OverlayError::Window(error.to_string()))
+    }
+}
+
 /// Spawns transparent borderless always-on-top overlay windows across attached displays.
-pub fn open_overlays<R: Runtime>(app: &AppHandle<R>, _request: &SelectionRequest) {
+pub fn open_overlays<R: Runtime>(app: &AppHandle<R>, request: &SelectionRequest) {
     let state = app.state::<AppState>();
     let displays = match state.displays() {
         Ok(list) if !list.is_empty() => list,
@@ -139,43 +239,12 @@ pub fn open_overlays<R: Runtime>(app: &AppHandle<R>, _request: &SelectionRequest
         }
     };
 
-    for (index, display) in displays.iter().enumerate() {
-        let label = format!("{OVERLAY_WINDOW_PREFIX}{index}");
-        // Close any pre-existing window with this label
-        if let Some(existing) = app.get_webview_window(&label) {
-            let _ = existing.close();
-        }
-
-        let bounds = display.bounds();
-        let scale = display.scale_factor().get();
-
-        // Convert physical bounds to logical for Tauri window builder
-        let logical_x = bounds.left() as f64 / scale;
-        let logical_y = bounds.top() as f64 / scale;
-        let logical_w = bounds.size().width() as f64 / scale;
-        let logical_h = bounds.size().height() as f64 / scale;
-
-        let builder =
-            WebviewWindowBuilder::new(app, &label, WebviewUrl::App("overlay.html".into()))
-                .title("NewPic Overlay")
-                .transparent(true)
-                .decorations(false)
-                .always_on_top(true)
-                .skip_taskbar(true)
-                .position(logical_x, logical_y)
-                .inner_size(logical_w, logical_h);
-
-        match builder.build() {
-            Ok(window) => {
-                let _ = window.set_focus();
-            }
-            Err(error) => {
-                state.record(
-                    EventLevel::Error,
-                    format!("failed to create overlay window {label}: {error}"),
-                );
-            }
-        }
+    let mut factory = TauriOverlayWindowFactory { app };
+    if let Err(error) = create_overlay_windows(request, &displays, &mut factory) {
+        state.record(
+            EventLevel::Error,
+            format!("failed to create overlay windows: {error}"),
+        );
     }
 }
 
