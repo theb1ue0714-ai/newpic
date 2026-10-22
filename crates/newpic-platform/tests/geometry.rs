@@ -427,3 +427,61 @@ fn mixed_dpi_reconstruction_requires_one_exact_rectangle() {
         )
     );
 }
+
+#[test]
+fn unchanged_full_topology_preserves_outside_display_margins_exactly() {
+    let screen = display("screen", 0, 0, 100, 100, 1.0);
+    let rect = PhysicalRect::new(-20, 10, 80, 40).unwrap();
+    let saved = SavedRegion::capture(rect, std::slice::from_ref(&screen)).unwrap();
+
+    assert_eq!(
+        saved.revalidate(std::slice::from_ref(&screen)),
+        SavedRegionDecision::Reuse(rect)
+    );
+
+    let moved = display("screen", 10, 0, 100, 100, 1.0);
+    assert_eq!(
+        saved.revalidate(&[moved]),
+        SavedRegionDecision::FallbackToSelection(
+            SavedRegionInvalidation::UncoveredPixelsCannotTransform
+        )
+    );
+}
+
+#[test]
+fn unchanged_full_topology_preserves_monitor_gap_pixels_exactly() {
+    let left = display("left", 0, 0, 100, 100, 1.0);
+    let right = display("right", 120, 0, 100, 100, 1.0);
+    let rect = PhysicalRect::new(80, 10, 60, 40).unwrap();
+    let saved = SavedRegion::capture(rect, &[left.clone(), right.clone()]).unwrap();
+
+    assert_eq!(
+        saved.revalidate(&[left.clone(), right.clone()]),
+        SavedRegionDecision::Reuse(rect)
+    );
+
+    let moved_right = display("right", 110, 0, 100, 100, 1.0);
+    assert_eq!(
+        saved.revalidate(&[left, moved_right]),
+        SavedRegionDecision::FallbackToSelection(
+            SavedRegionInvalidation::UncoveredPixelsCannotTransform
+        )
+    );
+}
+
+#[test]
+fn changed_topology_detects_a_new_display_participating_in_candidate_region() {
+    let source = display("source", 0, 0, 100, 100, 1.0);
+    let spare = display("spare", 200, 0, 100, 100, 1.0);
+    let saved = SavedRegion::capture(
+        PhysicalRect::new(10, 10, 40, 40).unwrap(),
+        &[source.clone(), spare],
+    )
+    .unwrap();
+    let moved_spare = display("spare", 20, 20, 100, 100, 1.0);
+
+    assert_eq!(
+        saved.revalidate(&[source, moved_spare]),
+        SavedRegionDecision::FallbackToSelection(SavedRegionInvalidation::ParticipantSetChanged)
+    );
+}

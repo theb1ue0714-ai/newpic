@@ -157,3 +157,36 @@ fn fake_supports_thread_safe_scripted_capture_and_display_results() {
         Err(CaptureError::BackendUnavailable(_))
     ));
 }
+
+#[test]
+fn fake_validation_precedes_and_does_not_consume_queued_capture_results() {
+    let capabilities = CaptureCapabilities::new(CaptureBackend::Test)
+        .with_region_capture(CapabilityStatus::supported())
+        .with_active_window_capture(CapabilityStatus::unsupported("disabled", None::<String>))
+        .with_display_capture(CapabilityStatus::supported())
+        .with_unattended_capture(CapabilityStatus::supported())
+        .with_pointer_capture(CapabilityStatus::supported());
+    let provider = FakeCaptureProvider::new(
+        capabilities,
+        FakeCaptureProvider::default().displays().unwrap(),
+    )
+    .unwrap();
+    provider.queue_capture_result(Err(CaptureError::PermissionDenied {
+        settings_hint: None,
+    }));
+
+    assert!(matches!(
+        provider.capture(CaptureRequest::new(
+            CaptureSource::ActiveWindow,
+            CaptureOptions::default(),
+        )),
+        Err(CaptureError::Unsupported { .. })
+    ));
+    assert!(matches!(
+        provider.capture(CaptureRequest::new(
+            CaptureSource::Region(PhysicalRect::new(0, 0, 10, 10).unwrap()),
+            CaptureOptions::default(),
+        )),
+        Err(CaptureError::PermissionDenied { .. })
+    ));
+}

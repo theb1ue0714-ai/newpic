@@ -49,6 +49,8 @@ impl FakeCaptureProvider {
             .clone()
     }
 
+    /// Queues a boundary result. Request and capability validation always run
+    /// first; a rejected request does not consume the queued result.
     pub fn queue_capture_result(&self, result: Result<CapturedImage, CaptureError>) {
         self.capture_results
             .lock()

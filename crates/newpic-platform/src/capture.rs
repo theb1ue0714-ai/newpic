@@ -67,33 +67,66 @@ pub enum CaptureProvenance {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayScaleSource {
+    display_id: DisplayId,
+    scale_factor: ScaleFactor,
+    provider_z_order: u32,
+}
+
+impl DisplayScaleSource {
+    pub const fn new(
+        display_id: DisplayId,
+        scale_factor: ScaleFactor,
+        provider_z_order: u32,
+    ) -> Self {
+        Self {
+            display_id,
+            scale_factor,
+            provider_z_order,
+        }
+    }
+
+    pub const fn display_id(&self) -> &DisplayId {
+        &self.display_id
+    }
+    pub const fn scale_factor(&self) -> ScaleFactor {
+        self.scale_factor
+    }
+    pub const fn provider_z_order(&self) -> u32 {
+        self.provider_z_order
+    }
+
+    /// Overlapping/mirrored sources are resolved by lower provider z-order,
+    /// then lexicographically by stable display ID.
+    pub fn precedes(&self, other: &Self) -> bool {
+        (self.provider_z_order, self.display_id.as_str())
+            < (other.provider_z_order, other.display_id.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaptureScaleSource {
+    Display(DisplayScaleSource),
+    /// Pixels in the rectangular capture that are not sourced from a display.
+    Gap,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureScaleSegment {
     image_rect: PhysicalRect,
-    source_display: DisplayId,
-    scale_factor: ScaleFactor,
+    source: CaptureScaleSource,
 }
 
 impl CaptureScaleSegment {
-    pub const fn new(
-        image_rect: PhysicalRect,
-        source_display: DisplayId,
-        scale_factor: ScaleFactor,
-    ) -> Self {
-        Self {
-            image_rect,
-            source_display,
-            scale_factor,
-        }
+    pub const fn new(image_rect: PhysicalRect, source: CaptureScaleSource) -> Self {
+        Self { image_rect, source }
     }
 
     pub const fn image_rect(&self) -> PhysicalRect {
         self.image_rect
     }
-    pub const fn source_display(&self) -> &DisplayId {
-        &self.source_display
-    }
-    pub const fn scale_factor(&self) -> ScaleFactor {
-        self.scale_factor
+    pub const fn source(&self) -> &CaptureScaleSource {
+        &self.source
     }
 }
 
@@ -121,9 +154,18 @@ impl CaptureScaleMetadata {
                 "mixed scale metadata requires at least two segments".into(),
             ));
         }
-        if segments
+        let display_scales: Vec<_> = segments
             .iter()
-            .all(|segment| segment.scale_factor == segments[0].scale_factor)
+            .filter_map(|segment| match segment.source() {
+                CaptureScaleSource::Display(source) => Some(source.scale_factor()),
+                CaptureScaleSource::Gap => None,
+            })
+            .collect();
+        let has_gap = display_scales.len() != segments.len();
+        if !has_gap
+            && display_scales
+                .iter()
+                .all(|scale| *scale == display_scales[0])
         {
             return Err(CaptureError::InvalidScaleSegments(
                 "mixed scale metadata must contain distinct scale factors".into(),
@@ -290,10 +332,15 @@ fn validate_scale_metadata(
                 "segments overlap".into(),
             ));
         }
-        if segments[..index].iter().any(|earlier| {
-            earlier.source_display() == segment.source_display()
-                && earlier.scale_factor() != segment.scale_factor()
-        }) {
+        if segments[..index]
+            .iter()
+            .any(|earlier| match (earlier.source(), segment.source()) {
+                (CaptureScaleSource::Display(a), CaptureScaleSource::Display(b)) => {
+                    a.display_id() == b.display_id() && a.scale_factor() != b.scale_factor()
+                }
+                _ => false,
+            })
+        {
             return Err(CaptureError::InvalidScaleSegments(
                 "one source display reports conflicting scale factors".into(),
             ));

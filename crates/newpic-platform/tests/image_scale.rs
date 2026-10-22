@@ -1,14 +1,57 @@
 use newpic_platform::capture::{
-    CaptureError, CaptureProvenance, CaptureScaleMetadata, CaptureScaleSegment, CapturedImage,
+    CaptureError, CaptureProvenance, CaptureScaleMetadata, CaptureScaleSegment, CaptureScaleSource,
+    CapturedImage, DisplayScaleSource,
 };
 use newpic_platform::geometry::{DisplayId, PhysicalRect, ScaleFactor};
 
 fn segment(id: &str, x: i32, y: i32, width: u32, height: u32, scale: f64) -> CaptureScaleSegment {
     CaptureScaleSegment::new(
         PhysicalRect::new(x, y, width, height).unwrap(),
-        DisplayId::new(id).unwrap(),
-        ScaleFactor::new(scale).unwrap(),
+        CaptureScaleSource::Display(DisplayScaleSource::new(
+            DisplayId::new(id).unwrap(),
+            ScaleFactor::new(scale).unwrap(),
+            0,
+        )),
     )
+}
+
+#[test]
+fn gap_segments_truthfully_cover_monitor_gap_pixels() {
+    let metadata = CaptureScaleMetadata::mixed(vec![
+        segment("left", 0, 0, 1, 2, 1.0),
+        CaptureScaleSegment::new(
+            PhysicalRect::new(1, 0, 1, 2).unwrap(),
+            CaptureScaleSource::Gap,
+        ),
+        segment("right", 2, 0, 1, 2, 1.5),
+    ])
+    .unwrap();
+
+    assert!(
+        CapturedImage::new(3, 2, 12, vec![0; 24], metadata, CaptureProvenance::Region,).is_ok()
+    );
+}
+
+#[test]
+fn mirrored_display_winner_is_lowest_provider_z_order_then_display_id() {
+    let a = DisplayScaleSource::new(
+        DisplayId::new("a").unwrap(),
+        ScaleFactor::new(1.0).unwrap(),
+        4,
+    );
+    let b = DisplayScaleSource::new(
+        DisplayId::new("b").unwrap(),
+        ScaleFactor::new(1.5).unwrap(),
+        2,
+    );
+    let c = DisplayScaleSource::new(
+        DisplayId::new("c").unwrap(),
+        ScaleFactor::new(2.0).unwrap(),
+        2,
+    );
+
+    assert!(b.precedes(&a));
+    assert!(b.precedes(&c));
 }
 
 #[test]

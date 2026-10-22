@@ -294,6 +294,16 @@ impl SavedDisplayTopology {
 pub struct SavedRegion {
     rect: PhysicalRect,
     participating_displays: Vec<SavedDisplayTopology>,
+    full_topology: Vec<DisplayFingerprint>,
+    fully_display_covered: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DisplayFingerprint {
+    id: DisplayId,
+    bounds: PhysicalRect,
+    scale_factor: ScaleFactor,
+    orientation: DisplayOrientation,
 }
 
 impl SavedRegion {
@@ -321,9 +331,17 @@ impl SavedRegion {
         if participating_displays.is_empty() {
             return Err(GeometryError::RegionOutsideDisplays);
         }
+        let original_pieces: Vec<_> = displays
+            .iter()
+            .filter_map(|display| rect.intersection(display.bounds()))
+            .collect();
+        let fully_display_covered = exact_rectangular_union(&original_pieces) == Some(rect);
+        let full_topology = displays.iter().map(DisplayFingerprint::from).collect();
         Ok(Self {
             rect,
             participating_displays,
+            full_topology,
+            fully_display_covered,
         })
     }
 
@@ -341,6 +359,15 @@ impl SavedRegion {
         if ensure_unique_display_ids(current).is_err() {
             return SavedRegionDecision::FallbackToSelection(
                 SavedRegionInvalidation::DuplicateDisplayId,
+            );
+        }
+        let current_topology: Vec<_> = current.iter().map(DisplayFingerprint::from).collect();
+        if current_topology == self.full_topology {
+            return SavedRegionDecision::Reuse(self.rect);
+        }
+        if !self.fully_display_covered {
+            return SavedRegionDecision::FallbackToSelection(
+                SavedRegionInvalidation::UncoveredPixelsCannotTransform,
             );
         }
         let mut pieces = Vec::with_capacity(self.participating_displays.len());
@@ -392,8 +419,39 @@ impl SavedRegion {
                     SavedRegionInvalidation::NonRectangularReconstruction,
                 )
             },
-            SavedRegionDecision::Reuse,
+            |candidate| {
+                let mut saved_ids: Vec<_> = self
+                    .participating_displays
+                    .iter()
+                    .map(|display| display.id.as_str())
+                    .collect();
+                let mut current_ids: Vec<_> = current
+                    .iter()
+                    .filter(|display| candidate.intersection(display.bounds()).is_some())
+                    .map(|display| display.id().as_str())
+                    .collect();
+                saved_ids.sort_unstable();
+                current_ids.sort_unstable();
+                if saved_ids == current_ids {
+                    SavedRegionDecision::Reuse(candidate)
+                } else {
+                    SavedRegionDecision::FallbackToSelection(
+                        SavedRegionInvalidation::ParticipantSetChanged,
+                    )
+                }
+            },
         )
+    }
+}
+
+impl From<&Display> for DisplayFingerprint {
+    fn from(display: &Display) -> Self {
+        Self {
+            id: display.id().clone(),
+            bounds: display.bounds(),
+            scale_factor: display.scale_factor(),
+            orientation: display.orientation(),
+        }
     }
 }
 
@@ -453,6 +511,8 @@ pub enum SavedRegionInvalidation {
     DisplayBoundsInsufficient(DisplayId),
     DuplicateDisplayId,
     NonRectangularReconstruction,
+    UncoveredPixelsCannotTransform,
+    ParticipantSetChanged,
     TranslatedRegionOutOfRange,
 }
 
