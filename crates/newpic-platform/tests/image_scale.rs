@@ -33,6 +33,23 @@ fn gap_segments_truthfully_cover_monitor_gap_pixels() {
 }
 
 #[test]
+fn mixed_metadata_rejects_an_all_gap_tiling() {
+    assert!(matches!(
+        CaptureScaleMetadata::mixed(vec![
+            CaptureScaleSegment::new(
+                PhysicalRect::new(0, 0, 1, 2).unwrap(),
+                CaptureScaleSource::Gap,
+            ),
+            CaptureScaleSegment::new(
+                PhysicalRect::new(1, 0, 1, 2).unwrap(),
+                CaptureScaleSource::Gap,
+            ),
+        ]),
+        Err(CaptureError::InvalidScaleSegments(_))
+    ));
+}
+
+#[test]
 fn mirrored_display_winner_is_lowest_provider_z_order_then_display_id() {
     let a = DisplayScaleSource::new(
         DisplayId::new("a").unwrap(),

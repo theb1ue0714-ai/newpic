@@ -470,6 +470,20 @@ fn unchanged_full_topology_preserves_monitor_gap_pixels_exactly() {
 }
 
 #[test]
+fn unchanged_topology_is_order_independent_for_gap_and_mirrored_layouts() {
+    let left = display("left", 0, 0, 100, 100, 1.0);
+    let right = display("right", 120, 0, 100, 100, 1.5);
+    let mirror = display("mirror", 0, 0, 100, 100, 2.0);
+    let rect = PhysicalRect::new(80, 10, 60, 40).unwrap();
+    let saved = SavedRegion::capture(rect, &[left.clone(), right.clone(), mirror.clone()]).unwrap();
+
+    assert_eq!(
+        saved.revalidate(&[mirror, right, left]),
+        SavedRegionDecision::Reuse(rect)
+    );
+}
+
+#[test]
 fn changed_topology_detects_a_new_display_participating_in_candidate_region() {
     let source = display("source", 0, 0, 100, 100, 1.0);
     let spare = display("spare", 200, 0, 100, 100, 1.0);

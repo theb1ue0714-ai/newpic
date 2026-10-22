@@ -162,6 +162,11 @@ impl CaptureScaleMetadata {
             })
             .collect();
         let has_gap = display_scales.len() != segments.len();
+        if display_scales.is_empty() {
+            return Err(CaptureError::InvalidScaleSegments(
+                "mixed scale metadata requires at least one display source".into(),
+            ));
+        }
         if !has_gap
             && display_scales
                 .iter()

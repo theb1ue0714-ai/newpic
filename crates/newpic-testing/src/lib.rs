@@ -58,6 +58,9 @@ impl FakeCaptureProvider {
             .push_back(result);
     }
 
+    /// Queues a one-shot display enumeration result. Each `displays()` call
+    /// consumes at most one entry; after the queue drains, baseline displays
+    /// are returned again. Successful scripted lists are ID-validated.
     pub fn queue_displays_result(&self, result: Result<Vec<Display>, CaptureError>) {
         self.display_results
             .lock()

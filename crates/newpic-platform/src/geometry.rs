@@ -336,7 +336,7 @@ impl SavedRegion {
             .filter_map(|display| rect.intersection(display.bounds()))
             .collect();
         let fully_display_covered = exact_rectangular_union(&original_pieces) == Some(rect);
-        let full_topology = displays.iter().map(DisplayFingerprint::from).collect();
+        let full_topology = normalized_topology(displays);
         Ok(Self {
             rect,
             participating_displays,
@@ -361,7 +361,7 @@ impl SavedRegion {
                 SavedRegionInvalidation::DuplicateDisplayId,
             );
         }
-        let current_topology: Vec<_> = current.iter().map(DisplayFingerprint::from).collect();
+        let current_topology = normalized_topology(current);
         if current_topology == self.full_topology {
             return SavedRegionDecision::Reuse(self.rect);
         }
@@ -453,6 +453,12 @@ impl From<&Display> for DisplayFingerprint {
             orientation: display.orientation(),
         }
     }
+}
+
+fn normalized_topology(displays: &[Display]) -> Vec<DisplayFingerprint> {
+    let mut topology: Vec<_> = displays.iter().map(DisplayFingerprint::from).collect();
+    topology.sort_unstable_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+    topology
 }
 
 fn ensure_unique_display_ids(displays: &[Display]) -> Result<(), GeometryError> {
