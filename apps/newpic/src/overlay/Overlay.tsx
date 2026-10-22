@@ -295,7 +295,7 @@ export function Overlay() {
     if (
       state.ready &&
       state.activeDisplay &&
-      state.status === 'completed' &&
+      (state.status === 'completed' || state.status === 'confirming') &&
       state.lastCompletedRegion
     ) {
       const physicalRect = logicalToPhysical(
@@ -304,6 +304,7 @@ export function Overlay() {
       );
       invoke('complete_selection', { rect: physicalRect }).catch((error) => {
         console.error('Failed to complete selection:', error);
+        dispatch({ type: 'CONFIRM_FAILED' });
       });
     }
   }, [

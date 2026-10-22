@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::{Datelike, Local, Timelike};
 use newpic_core::image_output::{ImageEncoding, JpegQuality};
@@ -267,11 +267,23 @@ fn naming_context_now() -> NamingContext {
 }
 
 /// Releases the capture-in-progress flag when dropped.
-pub struct CaptureGuard<'a>(&'a AtomicBool);
+pub struct CaptureGuard(Arc<AtomicBool>);
 
-impl Drop for CaptureGuard<'_> {
+impl Drop for CaptureGuard {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct CaptureGate(Arc<AtomicBool>);
+
+impl CaptureGate {
+    pub fn try_reserve(&self) -> Option<CaptureGuard> {
+        self.0
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| CaptureGuard(Arc::clone(&self.0)))
     }
 }
 
@@ -286,7 +298,7 @@ pub struct AppState {
     pub overlay: Mutex<OverlayCoordinator>,
     provider: Box<dyn CaptureProvider>,
     clipboard: Box<dyn ImageClipboard + Send + Sync>,
-    capture_busy: AtomicBool,
+    capture_gate: CaptureGate,
 }
 
 impl AppState {
@@ -309,7 +321,7 @@ impl AppState {
             overlay: Mutex::new(OverlayCoordinator::new()),
             provider,
             clipboard,
-            capture_busy: AtomicBool::new(false),
+            capture_gate: CaptureGate::default(),
         }
     }
 
@@ -317,8 +329,8 @@ impl AppState {
         lock(&self.settings).clone()
     }
 
-    pub fn replace_settings(&self, settings: Settings) {
-        *lock(&self.settings) = settings;
+    pub fn settings_transaction(&self) -> MutexGuard<'_, Settings> {
+        lock(&self.settings)
     }
 
     pub fn record(&self, level: EventLevel, message: impl Into<String>) {
@@ -330,11 +342,8 @@ impl AppState {
     }
 
     /// Claims the single capture slot; `None` while another capture runs.
-    pub fn try_begin_capture(&self) -> Option<CaptureGuard<'_>> {
-        self.capture_busy
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .ok()
-            .map(|_| CaptureGuard(&self.capture_busy))
+    pub fn try_begin_capture(&self) -> Option<CaptureGuard> {
+        self.capture_gate.try_reserve()
     }
 
     pub fn displays(

@@ -2,8 +2,8 @@ use newpic_core::settings::Size;
 use newpic_desktop_lib::app_state::{SelectionMode, SelectionRequest};
 use newpic_desktop_lib::hotkeys::CaptureAction;
 use newpic_desktop_lib::overlay::{
-    create_overlay_windows, overlay_info_for_label, OverlayError, OverlayWindowFactory,
-    PhysicalRectDto,
+    close_overlay_windows, create_overlay_windows, overlay_info_for_label, OverlayError,
+    OverlayWindowCloser, OverlayWindowFactory, PhysicalRectDto,
 };
 use newpic_platform::geometry::{
     Display, DisplayId, DisplayOrientation, PhysicalRect, ScaleFactor,
@@ -17,6 +17,66 @@ fn display(id: &str, x: i32, width: u32, primary: bool) -> Display {
         primary,
         DisplayOrientation::Landscape,
     )
+}
+
+#[derive(Default)]
+struct RecordingCloser {
+    open: Vec<String>,
+    close_error: bool,
+    stays_open: bool,
+    waits: usize,
+}
+
+impl OverlayWindowCloser for RecordingCloser {
+    fn labels(&self) -> Vec<String> {
+        self.open.clone()
+    }
+    fn close(&mut self, label: &str) -> Result<(), OverlayError> {
+        if self.close_error {
+            return Err(OverlayError::Window("close failed".into()));
+        }
+        if !self.stays_open {
+            self.open.retain(|item| item != label);
+        }
+        Ok(())
+    }
+    fn is_open(&self, label: &str) -> bool {
+        self.open.iter().any(|item| item == label)
+    }
+    fn wait_for_state_change(&mut self) {
+        self.waits += 1;
+    }
+}
+
+#[test]
+fn close_waits_for_verified_removal_and_reports_failures() {
+    let mut success = RecordingCloser {
+        open: vec!["overlay-0".into(), "main".into()],
+        ..Default::default()
+    };
+    close_overlay_windows(&mut success).unwrap();
+    assert_eq!(success.open, ["main"]);
+
+    let mut failed = RecordingCloser {
+        open: vec!["overlay-0".into()],
+        close_error: true,
+        ..Default::default()
+    };
+    assert!(matches!(
+        close_overlay_windows(&mut failed),
+        Err(OverlayError::Window(_))
+    ));
+
+    let mut timeout = RecordingCloser {
+        open: vec!["overlay-0".into()],
+        stays_open: true,
+        ..Default::default()
+    };
+    assert!(matches!(
+        close_overlay_windows(&mut timeout),
+        Err(OverlayError::CloseTimeout(_))
+    ));
+    assert_eq!(timeout.waits, 100);
 }
 
 fn request(action: CaptureAction, initial_rect: Option<PhysicalRectDto>) -> SelectionRequest {
@@ -126,16 +186,31 @@ fn overlapping_displays_still_select_exactly_one_active_f9_window() {
 }
 
 #[derive(Default)]
-struct RecordingFactory(Vec<String>);
+struct RecordingFactory {
+    events: Vec<String>,
+    fail_build: Option<String>,
+    fail_focus: bool,
+}
 
 impl OverlayWindowFactory for RecordingFactory {
     fn build(&mut self, label: &str, _display: &Display) -> Result<(), OverlayError> {
-        self.0.push(format!("build:{label}"));
+        self.events.push(format!("build:{label}"));
+        if self.fail_build.as_deref() == Some(label) {
+            return Err(OverlayError::Window("scripted build failure".into()));
+        }
         Ok(())
     }
 
     fn focus(&mut self, label: &str) -> Result<(), OverlayError> {
-        self.0.push(format!("focus:{label}"));
+        self.events.push(format!("focus:{label}"));
+        if self.fail_focus {
+            return Err(OverlayError::Window("scripted focus failure".into()));
+        }
+        Ok(())
+    }
+
+    fn cleanup(&mut self, label: &str) -> Result<(), OverlayError> {
+        self.events.push(format!("cleanup:{label}"));
         Ok(())
     }
 }
@@ -160,7 +235,63 @@ fn all_windows_build_before_exactly_one_active_f9_focus() {
     create_overlay_windows(&request, &displays, &mut factory).unwrap();
 
     assert_eq!(
-        factory.0,
+        factory.events,
         ["build:overlay-0", "build:overlay-1", "focus:overlay-0"]
+    );
+}
+
+#[test]
+fn first_middle_and_focus_failures_cleanup_every_built_overlay() {
+    let displays = vec![
+        display("left", -1280, 1280, false),
+        display("main", 0, 1920, true),
+    ];
+    let request = request(
+        CaptureAction::FixedRegion,
+        Some(PhysicalRectDto {
+            x: -1100,
+            y: 100,
+            width: 800,
+            height: 600,
+        }),
+    );
+
+    for (failure, expected) in [
+        (
+            Some("overlay-0"),
+            vec!["build:overlay-0", "cleanup:overlay-0"],
+        ),
+        (
+            Some("overlay-1"),
+            vec![
+                "build:overlay-0",
+                "build:overlay-1",
+                "cleanup:overlay-1",
+                "cleanup:overlay-0",
+            ],
+        ),
+    ] {
+        let mut factory = RecordingFactory {
+            fail_build: failure.map(str::to_owned),
+            ..Default::default()
+        };
+        assert!(create_overlay_windows(&request, &displays, &mut factory).is_err());
+        assert_eq!(factory.events, expected);
+    }
+
+    let mut factory = RecordingFactory {
+        fail_focus: true,
+        ..Default::default()
+    };
+    assert!(create_overlay_windows(&request, &displays, &mut factory).is_err());
+    assert_eq!(
+        factory.events,
+        [
+            "build:overlay-0",
+            "build:overlay-1",
+            "focus:overlay-0",
+            "cleanup:overlay-1",
+            "cleanup:overlay-0"
+        ]
     );
 }

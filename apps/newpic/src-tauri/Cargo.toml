@@ -32,3 +32,7 @@ newpic-windows = { path = "../../../crates/newpic-windows" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 newpic-macos = { path = "../../../crates/newpic-macos" }
+
+[dev-dependencies]
+newpic-testing = { path = "../../../crates/newpic-testing" }
+serde_json.workspace = true

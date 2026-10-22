@@ -155,6 +155,27 @@ describe('capture overlay', () => {
     });
   });
 
+  it('restores the same editable rectangle after a rejected confirmation and retries', async () => {
+    let completionAttempts = 0;
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'get_overlay_info') return fixedOverlayInfo;
+      if (command === 'complete_selection' && completionAttempts++ === 0) {
+        throw new Error('settings temporarily unavailable');
+      }
+      return undefined;
+    });
+    render(<Overlay />);
+    const cutout = await screen.findByTestId('selection-cutout');
+
+    fireEvent.keyDown(window, { key: 'Enter' });
+    await waitFor(() => expect(completionAttempts).toBe(1));
+    expect(cutout).toHaveStyle({ left: '100px', top: '150px' });
+
+    fireEvent.keyDown(window, { key: 'Enter' });
+    await waitFor(() => expect(completionAttempts).toBe(2));
+    expect(invokeMock.mock.calls.filter(([name]) => name === 'complete_selection')).toHaveLength(2);
+  });
+
   it('shows and completes F9 on exactly one active display overlay', async () => {
     const infos = [
       fixedOverlayInfo,

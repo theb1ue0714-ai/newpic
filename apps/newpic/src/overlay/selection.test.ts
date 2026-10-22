@@ -298,8 +298,12 @@ describe('selection reducer and coordinate helpers', () => {
       { type: 'CONFIRM' }
     );
 
-    expect(state.status).toBe('completed');
+    expect(state.status).toBe('confirming');
     expect(state.lastCompletedRegion).toEqual({ x: 100, y: 100, width: 800, height: 600 });
+
+    const failedState = selectionReducer(state, { type: 'CONFIRM_FAILED' });
+    expect(failedState.status).toBe('idle');
+    expect(failedState.currentRect).toEqual({ x: 100, y: 100, width: 800, height: 600 });
 
     const missing = initialSelectionState({
       mode: 'fixed_size',

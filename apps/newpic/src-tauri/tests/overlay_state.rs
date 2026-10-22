@@ -1,19 +1,29 @@
 use std::cell::{Cell, RefCell};
 use std::fs;
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 use newpic_core::settings::{
-    ConditionalSave, CorruptionRecovery, ExpectedSettingsState, Settings, SettingsRepository,
-    SettingsRepositoryError, Size,
+    ConditionalSave, CorruptionRecovery, ExpectedSettingsState, JsonFileSettingsRepository,
+    Settings, SettingsRepository, SettingsRepositoryError, Size,
 };
-use newpic_desktop_lib::app_state::{plan_capture, CapturePlan, SelectionMode, SelectionRequest};
+use newpic_desktop_lib::app_state::{
+    plan_capture, AppPaths, AppState, CaptureGate, CapturePlan, SelectionMode, SelectionRequest,
+};
 use newpic_desktop_lib::commands::{
-    complete_selection_with_effects, persist_settings_to_repository, prepare_settings_for_save,
+    complete_selection_with_effects, merge_read_only_saved_geometry, persist_settings_and_replace,
+    prepare_settings_for_save, with_capture_reservation,
 };
 use newpic_desktop_lib::hotkeys::CaptureAction;
-use newpic_desktop_lib::overlay::{OverlayCoordinator, OverlayError, PhysicalRectDto};
+use newpic_desktop_lib::overlay::{
+    overlay_info_for_label, start_overlay_session, OverlayCoordinator, OverlayError,
+    PhysicalRectDto,
+};
+use newpic_platform::clipboard::{ClipboardError, ClipboardImage, ImageClipboard};
 use newpic_platform::geometry::{
     Display, DisplayId, DisplayOrientation, PhysicalRect, SavedFixedRegion, ScaleFactor,
 };
+use newpic_testing::FakeCaptureProvider;
 
 fn test_display(
     id: &str,
@@ -87,6 +97,30 @@ impl SettingsRepository for RecordingRepository {
             backup_path: "settings.corrupt.json".into(),
         })
     }
+}
+
+struct NoopClipboard;
+
+impl ImageClipboard for NoopClipboard {
+    fn write_image(&self, _image: &ClipboardImage) -> Result<(), ClipboardError> {
+        Ok(())
+    }
+}
+
+fn real_state(root: &std::path::Path, settings: Settings) -> AppState {
+    let settings_file = root.join("settings.json");
+    AppState::new(
+        AppPaths {
+            settings_file: settings_file.clone(),
+            downloads_dir: root.join("downloads"),
+            recovery_dir: root.join("recovery"),
+        },
+        JsonFileSettingsRepository::new(settings_file),
+        settings,
+        None,
+        Box::new(FakeCaptureProvider::default()),
+        Box::new(NoopClipboard),
+    )
 }
 
 #[test]
@@ -199,7 +233,10 @@ fn failed_f9_save_retains_active_overlay_and_does_not_dispatch_capture() {
         PhysicalRect::new(160, 180, 700, 500).unwrap(),
         (
             |_| panic!("failed save must not apply settings"),
-            || closed.set(true),
+            || {
+                closed.set(true);
+                Ok(())
+            },
             || captured.set(true),
         ),
     );
@@ -232,7 +269,10 @@ fn successful_f9_save_precedes_completion_and_updates_size() {
         rect,
         (
             |_| repository.events.borrow_mut().push("apply"),
-            || repository.events.borrow_mut().push("close"),
+            || {
+                repository.events.borrow_mut().push("close");
+                Ok(())
+            },
             || repository.events.borrow_mut().push("capture"),
         ),
     )
@@ -255,6 +295,53 @@ fn successful_f9_save_precedes_completion_and_updates_size() {
         &["save", "apply", "close", "capture"]
     );
     assert!(!coordinator.is_active());
+}
+
+#[test]
+fn close_failure_blocks_capture_and_keeps_selection_retryable() {
+    let displays = vec![test_display("main", 0, 0, 1920, 1080, 1.0, true)];
+    let rect = PhysicalRect::new(160, 180, 700, 500).unwrap();
+    let mut coordinator = OverlayCoordinator::new();
+    coordinator
+        .start_selection(request(CaptureAction::FixedRegion, Some(rect)))
+        .unwrap();
+    let repository = RecordingRepository::default();
+    let captured = Cell::new(false);
+
+    let result = complete_selection_with_effects(
+        &mut coordinator,
+        &Settings::default(),
+        &repository,
+        &displays,
+        rect,
+        (
+            |_| {},
+            || {
+                Err(newpic_desktop_lib::commands::CommandError {
+                    message: "close failed".into(),
+                })
+            },
+            || captured.set(true),
+        ),
+    );
+    assert!(result.is_err());
+    assert!(coordinator.is_active());
+    assert!(!captured.get());
+}
+
+#[test]
+fn busy_capture_reservation_prevents_every_completion_side_effect() {
+    let gate = CaptureGate::default();
+    let held = gate.try_reserve().unwrap();
+    let touched = Cell::new(false);
+    let result = with_capture_reservation(gate.try_reserve(), |_| {
+        touched.set(true);
+        Ok(())
+    });
+    assert!(result.is_err());
+    assert!(!touched.get());
+    drop(held);
+    assert!(gate.try_reserve().is_some());
 }
 
 #[test]
@@ -322,16 +409,82 @@ fn command_service_default_reset_clears_f9_and_never_deletes_images() {
         ),
         ..Settings::default()
     };
-    let repository = RecordingRepository::default();
-
-    let reset =
-        persist_settings_to_repository(&repository, &previous, Settings::default(), &displays)
-            .unwrap();
+    let state = real_state(temp.path(), previous.clone());
+    state.repository.save(&previous).unwrap();
+    let reset = persist_settings_and_replace(
+        &state.repository,
+        &mut state.settings_transaction(),
+        Settings::default(),
+        &displays,
+    )
+    .unwrap();
 
     assert_eq!(reset.fixed_region, Size::new(800, 600));
     assert_eq!(reset.saved_fixed_region, None);
     assert_eq!(fs::read(&image).unwrap(), b"captured pixels");
-    assert_eq!(repository.saves.borrow().as_slice(), &[reset]);
+    assert_eq!(state.settings(), reset);
+    let disk: Settings =
+        serde_json::from_str(&fs::read_to_string(&state.paths.settings_file).unwrap()).unwrap();
+    assert_eq!(disk, reset);
+}
+
+#[test]
+fn settings_transaction_serializes_interleaving_without_lost_f9_or_disk_drift() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = Arc::new(real_state(temp.path(), Settings::default()));
+    state.repository.save(&Settings::default()).unwrap();
+    let barrier = Arc::new(Barrier::new(2));
+
+    let first_state = Arc::clone(&state);
+    let first_barrier = Arc::clone(&barrier);
+    let first = thread::spawn(move || {
+        let displays = first_state.displays().unwrap();
+        let mut guard = first_state.settings_transaction();
+        let rect = PhysicalRect::new(100, 100, 700, 500).unwrap();
+        guard.fixed_region = Size::new(700, 500);
+        guard.saved_fixed_region = Some(SavedFixedRegion::capture(rect, &displays).unwrap());
+        first_state.repository.save(&guard).unwrap();
+        first_barrier.wait();
+    });
+    let second_state = Arc::clone(&state);
+    let second = thread::spawn(move || {
+        barrier.wait();
+        let mut guard = second_state.settings_transaction();
+        guard.include_pointer = true;
+        second_state.repository.save(&guard).unwrap();
+    });
+    first.join().unwrap();
+    second.join().unwrap();
+
+    let memory = state.settings();
+    let disk: Settings =
+        serde_json::from_str(&fs::read_to_string(&state.paths.settings_file).unwrap()).unwrap();
+    assert!(memory.include_pointer);
+    assert!(memory.saved_fixed_region.is_some());
+    assert_eq!(disk, memory);
+}
+
+#[test]
+fn stale_settings_form_cannot_undo_a_concurrently_completed_f9() {
+    let displays = vec![test_display("main", 0, 0, 1920, 1080, 1.0, true)];
+    let stale = Settings::default();
+    let rect = PhysicalRect::new(100, 100, 700, 500).unwrap();
+    let current = Settings {
+        fixed_region: Size::new(700, 500),
+        saved_fixed_region: Some(SavedFixedRegion::capture(rect, &displays).unwrap()),
+        ..Settings::default()
+    };
+    let mut unrelated_form_save = Settings {
+        include_pointer: true,
+        ..stale
+    };
+    merge_read_only_saved_geometry(&current, &mut unrelated_form_save);
+    assert!(unrelated_form_save.include_pointer);
+    assert_eq!(unrelated_form_save.fixed_region, Size::new(700, 500));
+    assert_eq!(
+        unrelated_form_save.saved_fixed_region,
+        current.saved_fixed_region
+    );
 }
 
 #[test]
@@ -346,4 +499,66 @@ fn overlay_coordinator_rejects_concurrent_selection() {
             .unwrap_err(),
         OverlayError::AlreadyActive
     );
+}
+
+#[test]
+fn selection_session_keeps_one_display_snapshot_and_cancels_on_open_failure() {
+    let original = vec![
+        test_display("left", -1280, 0, 1280, 1024, 1.25, false),
+        test_display("main", 0, 0, 1920, 1080, 1.0, true),
+    ];
+    let reordered = [original[1].clone(), original[0].clone()];
+    let rect = PhysicalRect::new(-1100, 100, 800, 600).unwrap();
+    let request = request(CaptureAction::FixedRegion, Some(rect));
+    let mut coordinator = OverlayCoordinator::new();
+    start_overlay_session(
+        &mut coordinator,
+        request.clone(),
+        original.clone(),
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    let info = overlay_info_for_label(
+        "overlay-0",
+        coordinator.active_request().unwrap(),
+        coordinator.active_displays(),
+    )
+    .unwrap();
+    assert_eq!(info.display_bounds, original[0].bounds().into());
+    assert_ne!(info.display_bounds, reordered[0].bounds().into());
+    coordinator.cancel();
+
+    let error = start_overlay_session(&mut coordinator, request, original, |_, _| {
+        Err(OverlayError::Window("focus failed".into()))
+    });
+    assert!(error.is_err());
+    assert!(!coordinator.is_active());
+    assert!(coordinator.active_displays().is_empty());
+}
+
+#[test]
+fn completion_revalidates_current_topology_after_snapshotted_display_is_removed() {
+    let original = vec![test_display("left", -1280, 0, 1280, 1024, 1.25, true)];
+    let current = vec![test_display("main", 0, 0, 1920, 1080, 1.0, true)];
+    let rect = PhysicalRect::new(-1100, 100, 800, 600).unwrap();
+    let mut coordinator = OverlayCoordinator::new();
+    start_overlay_session(
+        &mut coordinator,
+        request(CaptureAction::FixedRegion, Some(rect)),
+        original,
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    let repository = RecordingRepository::default();
+    let result = complete_selection_with_effects(
+        &mut coordinator,
+        &Settings::default(),
+        &repository,
+        &current,
+        rect,
+        (|_| {}, || Ok(()), || {}),
+    );
+    assert!(result.is_err());
+    assert!(coordinator.is_active());
+    assert!(repository.saves.borrow().is_empty());
 }

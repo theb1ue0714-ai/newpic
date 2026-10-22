@@ -18,6 +18,7 @@ const settings: Settings = {
   naming: { pattern: "%c", minimum_width: 3 },
   clipboard: { enabled: true },
   fixed_region: { width: 800, height: 600 },
+  saved_fixed_region: null,
   hotkeys: { region: "F7", repeat_region: "F8", fixed_region: "F9", active_window: "F10" },
 };
 

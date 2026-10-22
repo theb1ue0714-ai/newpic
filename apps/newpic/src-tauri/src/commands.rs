@@ -9,8 +9,8 @@ use tauri::{AppHandle, Manager, Runtime, State, WebviewWindow};
 use tauri_plugin_notification::NotificationExt;
 
 use crate::app_state::{
-    delivery_notice, lock, plan_capture, AppState, CapturePlan, Notice, SelectionMode,
-    SelectionRequest,
+    delivery_notice, lock, plan_capture, AppState, CaptureGuard, CapturePlan, Notice,
+    SelectionMode, SelectionRequest,
 };
 use crate::autostart::{self, AutostartStatus};
 use crate::diagnostics::{Diagnostics, EventLevel};
@@ -64,7 +64,7 @@ pub fn save_settings<R: Runtime>(
     state: State<'_, AppState>,
     settings: Settings,
 ) -> Result<SaveSettingsResponse, CommandError> {
-    persist_settings(&app, &state, settings)
+    persist_settings(&app, &state, settings, true)
 }
 
 /// Restores the approved preset. The settings window confirms first; captured
@@ -74,7 +74,7 @@ pub fn apply_default_preset<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, AppState>,
 ) -> Result<SaveSettingsResponse, CommandError> {
-    let response = persist_settings(&app, &state, Settings::default())?;
+    let response = persist_settings(&app, &state, Settings::default(), false)?;
     state.record(EventLevel::Info, "default preset reapplied");
     Ok(response)
 }
@@ -89,7 +89,7 @@ pub fn choose_save_folder<R: Runtime>(
 ) -> Result<SaveSettingsResponse, CommandError> {
     let mut settings = state.settings();
     settings.save.directory = SaveDirectory::Custom(PathBuf::from(path));
-    persist_settings(&app, &state, settings)
+    persist_settings(&app, &state, settings, true)
 }
 
 #[tauri::command]
@@ -107,10 +107,8 @@ pub fn get_overlay_info<R: Runtime>(
         .active_request()
         .cloned()
         .ok_or_else(|| CommandError::new("no active selection request"))?;
-    let displays = state
-        .displays()
-        .map_err(|e| CommandError::new(format!("could not query displays: {e}")))?;
-    overlay::overlay_info_for_label(window.label(), &request, &displays).map_err(CommandError::new)
+    overlay::overlay_info_for_label(window.label(), &request, coordinator.active_displays())
+        .map_err(CommandError::new)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -119,15 +117,17 @@ pub struct CommittedSelection {
     pub settings: Settings,
 }
 
-/// Atomically persists F9 before making the coordinator observable as
-/// complete. For F7 no settings write is needed; its completion updates only
-/// the in-memory F8 slot.
-pub fn commit_selection<R: SettingsRepository>(
+pub fn complete_selection_with_effects<R: SettingsRepository>(
     coordinator: &mut overlay::OverlayCoordinator,
     current: &Settings,
     repository: &R,
     displays: &[Display],
     rect: PhysicalRect,
+    effects: (
+        impl FnOnce(&CommittedSelection),
+        impl FnOnce() -> Result<(), CommandError>,
+        impl FnOnce(),
+    ),
 ) -> Result<CommittedSelection, CommandError> {
     let request = coordinator
         .active_request()
@@ -140,31 +140,26 @@ pub fn commit_selection<R: SettingsRepository>(
         settings.saved_fixed_region = Some(saved);
         repository.save(&settings).map_err(CommandError::new)?;
     }
-    let completed = coordinator.complete(rect).map_err(CommandError::new)?;
-    Ok(CommittedSelection {
-        request: completed,
-        settings,
-    })
-}
-
-pub fn complete_selection_with_effects<R: SettingsRepository>(
-    coordinator: &mut overlay::OverlayCoordinator,
-    current: &Settings,
-    repository: &R,
-    displays: &[Display],
-    rect: PhysicalRect,
-    effects: (
-        impl FnOnce(&CommittedSelection),
-        impl FnOnce(),
-        impl FnOnce(),
-    ),
-) -> Result<CommittedSelection, CommandError> {
-    let committed = commit_selection(coordinator, current, repository, displays, rect)?;
+    let pending = CommittedSelection { request, settings };
     let (apply_settings, close_windows, dispatch_capture) = effects;
-    apply_settings(&committed);
-    close_windows();
+    apply_settings(&pending);
+    close_windows()?;
+    let completed = coordinator.complete(rect).map_err(CommandError::new)?;
+    let committed = CommittedSelection {
+        request: completed,
+        settings: pending.settings,
+    };
     dispatch_capture();
     Ok(committed)
+}
+
+pub fn with_capture_reservation<T>(
+    reservation: Option<CaptureGuard>,
+    operation: impl FnOnce(CaptureGuard) -> Result<T, CommandError>,
+) -> Result<T, CommandError> {
+    let reservation =
+        reservation.ok_or_else(|| CommandError::new("another capture is already running"))?;
+    operation(reservation)
 }
 
 #[tauri::command]
@@ -174,38 +169,39 @@ pub fn complete_selection<R: Runtime>(
     rect: PhysicalRectDto,
 ) -> Result<(), CommandError> {
     let physical_rect = PhysicalRect::try_from(rect).map_err(CommandError::new)?;
-    let displays = state
-        .displays()
-        .map_err(|error| CommandError::new(format!("could not query displays: {error}")))?;
-    complete_selection_with_effects(
-        &mut lock(&state.overlay),
-        &state.settings(),
-        &state.repository,
-        &displays,
-        physical_rect,
-        (
-            |committed| {
-                if committed.request.action == CaptureAction::FixedRegion {
-                    state.replace_settings(committed.settings.clone());
-                }
-            },
-            || overlay::close_overlays(&app),
-            || dispatch_region_capture(app.clone(), physical_rect),
-        ),
-    )?;
-    Ok(())
+    with_capture_reservation(state.try_begin_capture(), |reservation| {
+        let displays = state
+            .displays()
+            .map_err(|error| CommandError::new(format!("could not query displays: {error}")))?;
+        let mut settings_transaction = state.settings_transaction();
+        let current_settings = settings_transaction.clone();
+        complete_selection_with_effects(
+            &mut lock(&state.overlay),
+            &current_settings,
+            &state.repository,
+            &displays,
+            physical_rect,
+            (
+                |committed| {
+                    if committed.request.action == CaptureAction::FixedRegion {
+                        *settings_transaction = committed.settings.clone();
+                    }
+                },
+                || overlay::close_overlays(&app).map_err(CommandError::new),
+                || dispatch_region_capture(app.clone(), physical_rect, reservation),
+            ),
+        )?;
+        Ok(())
+    })
 }
 
-fn dispatch_region_capture<R: Runtime>(app: AppHandle<R>, physical_rect: PhysicalRect) {
+fn dispatch_region_capture<R: Runtime>(
+    app: AppHandle<R>,
+    physical_rect: PhysicalRect,
+    _reservation: crate::app_state::CaptureGuard,
+) {
     thread::spawn(move || {
         let state = app.state::<AppState>();
-        let Some(_guard) = state.try_begin_capture() else {
-            state.record(
-                EventLevel::Warning,
-                "capture ignored: another capture is running",
-            );
-            return;
-        };
         let notice = match state.capture(CaptureSource::Region(physical_rect)) {
             Ok(image) => {
                 let result = state.deliver(&image);
@@ -229,10 +225,10 @@ pub fn cancel_selection<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    overlay::close_overlays(&app);
+    let closed = overlay::close_overlays(&app).map_err(CommandError::new);
     lock(&state.overlay).cancel();
     state.record(EventLevel::Info, "selection cancelled");
-    Ok(())
+    closed
 }
 
 #[tauri::command]
@@ -262,9 +258,14 @@ fn persist_settings<R: Runtime>(
     app: &AppHandle<R>,
     state: &AppState,
     mut requested: Settings,
+    preserve_saved_geometry: bool,
 ) -> Result<SaveSettingsResponse, CommandError> {
     requested.validate().map_err(CommandError::new)?;
-    let previous = state.settings();
+    let mut settings_transaction = state.settings_transaction();
+    let previous = settings_transaction.clone();
+    if preserve_saved_geometry {
+        merge_read_only_saved_geometry(&previous, &mut requested);
+    }
     let displays = if requested.fixed_region != previous.fixed_region
         && requested.saved_fixed_region.is_some()
     {
@@ -298,23 +299,24 @@ fn persist_settings<R: Runtime>(
         }
     };
 
-    let requested =
-        match persist_settings_to_repository(&state.repository, &previous, requested, &displays) {
-            Ok(requested) => requested,
-            Err(error) => {
-                // Roll shortcuts back so the running app matches the file on disk.
-                let mut manager = lock(&state.hotkeys);
-                hotkeys::with_registrar(app, |registrar| {
-                    manager.apply(registrar, &previous.hotkeys)
-                });
-                return Err(error);
-            }
-        };
+    let requested = match persist_settings_and_replace(
+        &state.repository,
+        &mut settings_transaction,
+        requested,
+        &displays,
+    ) {
+        Ok(requested) => requested,
+        Err(error) => {
+            // Roll shortcuts back so the running app matches the file on disk.
+            let mut manager = lock(&state.hotkeys);
+            hotkeys::with_registrar(app, |registrar| manager.apply(registrar, &previous.hotkeys));
+            return Err(error);
+        }
+    };
 
     if requested.autostart != previous.autostart {
         reconcile_autostart(app, state, requested.autostart);
     }
-    state.replace_settings(requested.clone());
     for rejected in &rejected_shortcuts {
         state.record(EventLevel::Warning, rejected.message.clone());
     }
@@ -326,6 +328,15 @@ fn persist_settings<R: Runtime>(
         rejected_shortcuts,
         autostart: lock(&state.autostart).clone(),
     })
+}
+
+pub fn merge_read_only_saved_geometry(previous: &Settings, requested: &mut Settings) {
+    if requested.saved_fixed_region != previous.saved_fixed_region {
+        // The settings form was loaded before a completed F9 capture. Its
+        // dimensions are stale too, so an unrelated save must not undo F9.
+        requested.fixed_region = previous.fixed_region;
+    }
+    requested.saved_fixed_region = previous.saved_fixed_region.clone();
 }
 
 pub fn prepare_settings_for_save(
@@ -359,6 +370,17 @@ pub fn persist_settings_to_repository<R: SettingsRepository>(
     Ok(prepared)
 }
 
+pub fn persist_settings_and_replace<R: SettingsRepository>(
+    repository: &R,
+    memory: &mut Settings,
+    requested: Settings,
+    displays: &[Display],
+) -> Result<Settings, CommandError> {
+    let prepared = persist_settings_to_repository(repository, memory, requested, displays)?;
+    *memory = prepared.clone();
+    Ok(prepared)
+}
+
 /// Reconciles login startup and reports failures without stopping the app.
 pub fn reconcile_autostart<R: Runtime>(app: &AppHandle<R>, state: &AppState, desired: bool) {
     let status = match app.try_state::<tauri_plugin_autostart::AutoLaunchManager>() {
@@ -386,19 +408,25 @@ pub fn reconcile_autostart<R: Runtime>(app: &AppHandle<R>, state: &AppState, des
 /// Starts a capture action from a shortcut, the tray, or the settings window.
 pub fn run_action<R: Runtime>(app: &AppHandle<R>, action: CaptureAction) {
     let state = app.state::<AppState>();
-    let plan = match action {
+    let (plan, selection_displays) = match action {
         CaptureAction::RepeatRegion => {
             let displays = state.displays().unwrap_or_default();
             if let Some(region) = lock(&state.overlay).validate_repeat_region(&displays) {
-                CapturePlan::Direct(CaptureSource::Region(region))
+                (
+                    CapturePlan::Direct(CaptureSource::Region(region)),
+                    Vec::new(),
+                )
             } else {
-                CapturePlan::Select(SelectionRequest {
-                    action: CaptureAction::Region,
-                    mode: SelectionMode::FreeRegion,
-                    fixed_size: None,
-                    fallback_from: Some(CaptureAction::RepeatRegion),
-                    initial_rect: None,
-                })
+                (
+                    CapturePlan::Select(SelectionRequest {
+                        action: CaptureAction::Region,
+                        mode: SelectionMode::FreeRegion,
+                        fixed_size: None,
+                        fallback_from: Some(CaptureAction::RepeatRegion),
+                        initial_rect: None,
+                    }),
+                    displays,
+                )
             }
         }
         other => {
@@ -417,7 +445,7 @@ pub fn run_action<R: Runtime>(app: &AppHandle<R>, action: CaptureAction) {
                 }
             };
             match plan_capture(other, &state.settings(), &displays) {
-                Ok(plan) => plan,
+                Ok(plan) => (plan, displays),
                 Err(error) => {
                     state.record(
                         EventLevel::Error,
@@ -432,23 +460,30 @@ pub fn run_action<R: Runtime>(app: &AppHandle<R>, action: CaptureAction) {
     match plan {
         CapturePlan::Select(request) => {
             let mut overlay = lock(&state.overlay);
-            if let Err(OverlayError::AlreadyActive) = overlay.start_selection(request.clone()) {
-                state.record(
-                    EventLevel::Warning,
-                    "capture ignored: another capture or selection is running",
-                );
-                notify(
-                    app,
-                    &Notice {
-                        title: "캡처 진행 중".to_owned(),
-                        body: "이미 캡처 또는 영역 선택이 진행 중입니다.".to_owned(),
-                        level: EventLevel::Warning,
-                    },
-                );
-                return;
+            let result = overlay::start_overlay_session(
+                &mut overlay,
+                request,
+                selection_displays,
+                |request, displays| overlay::open_overlays(app, request, displays),
+            );
+            if let Err(error) = result {
+                let level = if error == OverlayError::AlreadyActive {
+                    EventLevel::Warning
+                } else {
+                    EventLevel::Error
+                };
+                state.record(level, format!("overlay startup failed: {error}"));
+                if error == OverlayError::AlreadyActive {
+                    notify(
+                        app,
+                        &Notice {
+                            title: "캡처 진행 중".to_owned(),
+                            body: "이미 캡처 또는 영역 선택이 진행 중입니다.".to_owned(),
+                            level,
+                        },
+                    );
+                }
             }
-            drop(overlay);
-            overlay::open_overlays(app, &request);
         }
         CapturePlan::Direct(source) => {
             let app = app.clone();

@@ -40,7 +40,7 @@ export interface SelectionState {
   ready: boolean;
   activeDisplay: boolean;
   mode: SelectionMode;
-  status: 'idle' | 'selecting' | 'completed' | 'cancelled';
+  status: 'idle' | 'selecting' | 'confirming' | 'completed' | 'cancelled';
   startPoint: Point | null;
   currentPoint: Point | null;
   fixedSize: Size;
@@ -81,6 +81,7 @@ export type SelectionAction =
       dy: number;
     }
   | { type: 'CONFIRM' }
+  | { type: 'CONFIRM_FAILED' }
   | { type: 'CANCEL' }
   | { type: 'RESET' };
 
@@ -444,10 +445,15 @@ export function selectionReducer(
       }
       return {
         ...state,
-        status: 'completed',
+        status: 'confirming',
         interaction: null,
         lastCompletedRegion: state.currentRect,
       };
+    }
+
+    case 'CONFIRM_FAILED': {
+      if (state.status !== 'confirming') return state;
+      return { ...state, status: 'idle', interaction: null };
     }
 
     case 'CANCEL': {

@@ -27,6 +27,8 @@ pub enum OverlayError {
     InvalidWindowLabel(String),
     #[error("overlay display index is out of range: {0}")]
     DisplayIndexOutOfRange(usize),
+    #[error("overlay windows did not close: {0:?}")]
+    CloseTimeout(Vec<String>),
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -41,6 +43,7 @@ pub struct OverlayInfo {
 #[derive(Debug, Default)]
 pub struct OverlayCoordinator {
     active_request: Option<SelectionRequest>,
+    active_displays: Vec<Display>,
     last_region: Option<PhysicalRect>,
 }
 
@@ -48,6 +51,7 @@ impl OverlayCoordinator {
     pub const fn new() -> Self {
         Self {
             active_request: None,
+            active_displays: Vec::new(),
             last_region: None,
         }
     }
@@ -61,15 +65,29 @@ impl OverlayCoordinator {
     }
 
     pub fn start_selection(&mut self, request: SelectionRequest) -> Result<(), OverlayError> {
+        self.start_selection_with_displays(request, Vec::new())
+    }
+
+    pub fn start_selection_with_displays(
+        &mut self,
+        request: SelectionRequest,
+        displays: Vec<Display>,
+    ) -> Result<(), OverlayError> {
         if self.is_active() {
             return Err(OverlayError::AlreadyActive);
         }
         self.active_request = Some(request);
+        self.active_displays = displays;
         Ok(())
+    }
+
+    pub fn active_displays(&self) -> &[Display] {
+        &self.active_displays
     }
 
     pub fn cancel(&mut self) {
         self.active_request = None;
+        self.active_displays.clear();
         // Preserves last_region for F8 repeat
     }
 
@@ -78,6 +96,7 @@ impl OverlayCoordinator {
             .active_request
             .take()
             .ok_or(OverlayError::NoActiveSelection)?;
+        self.active_displays.clear();
         if request.action == CaptureAction::Region {
             self.last_region = Some(rect);
         }
@@ -106,6 +125,20 @@ impl OverlayCoordinator {
             Some(region)
         }
     }
+}
+
+pub fn start_overlay_session(
+    coordinator: &mut OverlayCoordinator,
+    request: SelectionRequest,
+    displays: Vec<Display>,
+    open: impl FnOnce(&SelectionRequest, &[Display]) -> Result<(), OverlayError>,
+) -> Result<(), OverlayError> {
+    coordinator.start_selection_with_displays(request.clone(), displays.clone())?;
+    if let Err(error) = open(&request, &displays) {
+        coordinator.cancel();
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn display_contains(display: &Display, rect: PhysicalRect) -> bool {
@@ -169,6 +202,7 @@ pub fn overlay_info_for_label(
 pub trait OverlayWindowFactory {
     fn build(&mut self, label: &str, display: &Display) -> Result<(), OverlayError>;
     fn focus(&mut self, label: &str) -> Result<(), OverlayError>;
+    fn cleanup(&mut self, label: &str) -> Result<(), OverlayError>;
 }
 
 pub fn create_overlay_windows(
@@ -176,13 +210,35 @@ pub fn create_overlay_windows(
     displays: &[Display],
     factory: &mut impl OverlayWindowFactory,
 ) -> Result<(), OverlayError> {
+    let mut built: Vec<String> = Vec::new();
     for (index, display) in displays.iter().enumerate() {
-        factory.build(&format!("{OVERLAY_WINDOW_PREFIX}{index}"), display)?;
+        let label = format!("{OVERLAY_WINDOW_PREFIX}{index}");
+        if let Err(error) = factory.build(&label, display) {
+            let _ = factory.cleanup(&label);
+            for built_label in built.iter().rev() {
+                let _ = factory.cleanup(built_label);
+            }
+            return Err(error);
+        }
+        built.push(label);
     }
 
     if request.mode == SelectionMode::FixedSize {
-        let active = active_fixed_display_index(request, displays)?;
-        factory.focus(&format!("{OVERLAY_WINDOW_PREFIX}{active}"))?;
+        let active = match active_fixed_display_index(request, displays) {
+            Ok(active) => active,
+            Err(error) => {
+                for label in built.iter().rev() {
+                    let _ = factory.cleanup(label);
+                }
+                return Err(error);
+            }
+        };
+        if let Err(error) = factory.focus(&format!("{OVERLAY_WINDOW_PREFIX}{active}")) {
+            for label in built.iter().rev() {
+                let _ = factory.cleanup(label);
+            }
+            return Err(error);
+        }
     }
     Ok(())
 }
@@ -223,39 +279,116 @@ impl<R: Runtime> OverlayWindowFactory for TauriOverlayWindowFactory<'_, R> {
             .set_focus()
             .map_err(|error| OverlayError::Window(error.to_string()))
     }
+
+    fn cleanup(&mut self, label: &str) -> Result<(), OverlayError> {
+        match self.app.get_webview_window(label) {
+            Some(window) => {
+                window
+                    .hide()
+                    .map_err(|error| OverlayError::Window(error.to_string()))?;
+                window
+                    .close()
+                    .map_err(|error| OverlayError::Window(error.to_string()))
+            }
+            None => Ok(()),
+        }
+    }
 }
 
 /// Spawns transparent borderless always-on-top overlay windows across attached displays.
-pub fn open_overlays<R: Runtime>(app: &AppHandle<R>, request: &SelectionRequest) {
+pub fn open_overlays<R: Runtime>(
+    app: &AppHandle<R>,
+    request: &SelectionRequest,
+    displays: &[Display],
+) -> Result<(), OverlayError> {
     let state = app.state::<AppState>();
-    let displays = match state.displays() {
-        Ok(list) if !list.is_empty() => list,
-        _ => {
-            state.record(
-                EventLevel::Error,
-                "cannot open overlay: no displays detected",
-            );
-            return;
-        }
-    };
+    if displays.is_empty() {
+        return Err(OverlayError::Window("no displays detected".into()));
+    }
 
     let mut factory = TauriOverlayWindowFactory { app };
-    if let Err(error) = create_overlay_windows(request, &displays, &mut factory) {
+    if let Err(error) = create_overlay_windows(request, displays, &mut factory) {
         state.record(
             EventLevel::Error,
             format!("failed to create overlay windows: {error}"),
         );
+        return Err(error);
+    }
+    Ok(())
+}
+
+pub trait OverlayWindowCloser {
+    fn labels(&self) -> Vec<String>;
+    fn close(&mut self, label: &str) -> Result<(), OverlayError>;
+    fn is_open(&self, label: &str) -> bool;
+    fn wait_for_state_change(&mut self);
+}
+
+pub fn close_overlay_windows(closer: &mut impl OverlayWindowCloser) -> Result<(), OverlayError> {
+    let labels: Vec<_> = closer
+        .labels()
+        .into_iter()
+        .filter(|label| label.starts_with(OVERLAY_WINDOW_PREFIX))
+        .collect();
+    for label in &labels {
+        closer.close(label)?;
+    }
+    for _ in 0..100 {
+        let open: Vec<_> = labels
+            .iter()
+            .filter(|label| closer.is_open(label))
+            .cloned()
+            .collect();
+        if open.is_empty() {
+            return Ok(());
+        }
+        closer.wait_for_state_change();
+    }
+    Err(OverlayError::CloseTimeout(
+        labels
+            .into_iter()
+            .filter(|label| closer.is_open(label))
+            .collect(),
+    ))
+}
+
+struct TauriOverlayWindowCloser<'a, R: Runtime> {
+    app: &'a AppHandle<R>,
+}
+
+impl<R: Runtime> OverlayWindowCloser for TauriOverlayWindowCloser<'_, R> {
+    fn labels(&self) -> Vec<String> {
+        self.app.webview_windows().into_keys().collect()
+    }
+
+    fn close(&mut self, label: &str) -> Result<(), OverlayError> {
+        match self.app.get_webview_window(label) {
+            Some(window) => {
+                window
+                    .hide()
+                    .map_err(|error| OverlayError::Window(error.to_string()))?;
+                window
+                    .close()
+                    .map_err(|error| OverlayError::Window(error.to_string()))
+            }
+            None => Ok(()),
+        }
+    }
+
+    fn is_open(&self, label: &str) -> bool {
+        self.app
+            .get_webview_window(label)
+            .and_then(|window| window.is_visible().ok())
+            .unwrap_or(false)
+    }
+
+    fn wait_for_state_change(&mut self) {
+        std::thread::sleep(Duration::from_millis(5));
     }
 }
 
-/// Closes all open overlay windows and yields to allow the compositor to clear them before taking screenshot.
-pub fn close_overlays<R: Runtime>(app: &AppHandle<R>) {
-    let windows = app.webview_windows();
-    for (label, window) in windows {
-        if label.starts_with(OVERLAY_WINDOW_PREFIX) {
-            let _ = window.close();
-        }
-    }
-    // Brief sleep to ensure overlay windows are fully unmapped by compositor before screen capture
-    std::thread::sleep(Duration::from_millis(50));
+/// Requests closure and polls the native window registry until every overlay
+/// is actually gone, so no overlay pixels can leak into the capture.
+pub fn close_overlays<R: Runtime>(app: &AppHandle<R>) -> Result<(), OverlayError> {
+    close_overlay_windows(&mut TauriOverlayWindowCloser { app })
 }
