@@ -43,6 +43,17 @@ const RESIZE_HANDLES: ReadonlyArray<ResizeHandle> = [
   'nw',
 ];
 
+const RESIZE_HANDLE_LABELS: Record<ResizeHandle, string> = {
+  n: '위쪽 크기 조절',
+  ne: '오른쪽 위 크기 조절',
+  e: '오른쪽 크기 조절',
+  se: '오른쪽 아래 크기 조절',
+  s: '아래쪽 크기 조절',
+  sw: '왼쪽 아래 크기 조절',
+  w: '왼쪽 크기 조절',
+  nw: '왼쪽 위 크기 조절',
+};
+
 const DIMENSION_BADGE_WIDTH = 96;
 const DIMENSION_BADGE_HEIGHT = 24;
 const DIMENSION_BADGE_GAP = 6;
@@ -232,17 +243,41 @@ export function Overlay() {
     [state.ready]
   );
 
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (!state.ready || !state.activeDisplay) {
+  const handleControlKeyDown = useCallback(
+    (
+      event: React.KeyboardEvent<HTMLElement>,
+      target: 'rect' | ResizeHandle
+    ) => {
+      const step = event.shiftKey ? 10 : 1;
+      const delta = {
+        ArrowLeft: { dx: -step, dy: 0 },
+        ArrowRight: { dx: step, dy: 0 },
+        ArrowUp: { dx: 0, dy: -step },
+        ArrowDown: { dx: 0, dy: step },
+      }[event.key];
+      if (!delta) {
         return;
       }
+      event.preventDefault();
+      event.stopPropagation();
+      dispatch({ type: 'KEYBOARD_ADJUST', target, ...delta });
+    },
+    []
+  );
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault();
         releaseActivePointer();
         dispatch({ type: 'CANCEL' });
         invoke('cancel_selection').catch(() => {});
-      } else if (
+        return;
+      }
+      if (!state.ready || !state.activeDisplay) {
+        return;
+      }
+      if (
         event.key === 'Enter' &&
         state.mode === 'fixed_size' &&
         state.activeDisplay
@@ -326,14 +361,20 @@ export function Overlay() {
                 <div
                   className="fixed-move-surface"
                   data-selection-target="rect"
+                  role="button"
+                  tabIndex={0}
                   aria-label="캡처 영역 이동"
+                  onKeyDown={(event) => handleControlKeyDown(event, 'rect')}
                 />
                 {RESIZE_HANDLES.map((handle) => (
                   <div
                     key={handle}
                     className={`resize-handle resize-handle--${handle}`}
                     data-handle={handle}
-                    aria-hidden="true"
+                    role="button"
+                    tabIndex={0}
+                    aria-label={RESIZE_HANDLE_LABELS[handle]}
+                    onKeyDown={(event) => handleControlKeyDown(event, handle)}
                   />
                 ))}
               </>

@@ -51,6 +51,11 @@ body,
   touch-action: none;
 }
 
+.fixed-move-surface:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: -5px;
+}
+
 .resize-handle {
   position: absolute;
   z-index: 2;
@@ -60,6 +65,12 @@ body,
   border-radius: 0;
   background: transparent;
   touch-action: none;
+}
+
+.resize-handle:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 1px;
+  background: rgba(37, 99, 235, 0.45);
 }
 
 .resize-handle--n,

@@ -86,7 +86,7 @@ describe('capture overlay', () => {
     expect(screen.getByTestId('dimension-badge')).toHaveTextContent('800 × 600');
   });
 
-  it('uses pointer-only resize handles and targets a real east resize', async () => {
+  it('exposes named keyboard-operable controls and targets a real east resize', async () => {
     render(<Overlay />);
     const container = screen.getByTestId('overlay-container');
     const pointerCapture = installPointerCapture(container);
@@ -94,9 +94,18 @@ describe('capture overlay', () => {
 
     const handles = container.querySelectorAll<HTMLElement>('[data-handle]');
     expect(handles).toHaveLength(8);
-    for (const handle of handles) {
-      expect(handle.tagName).toBe('DIV');
-      expect(handle).toHaveAttribute('aria-hidden', 'true');
+    expect(screen.getByRole('button', { name: '캡처 영역 이동' })).toBeVisible();
+    for (const label of [
+      '위쪽 크기 조절',
+      '오른쪽 위 크기 조절',
+      '오른쪽 크기 조절',
+      '오른쪽 아래 크기 조절',
+      '아래쪽 크기 조절',
+      '왼쪽 아래 크기 조절',
+      '왼쪽 크기 조절',
+      '왼쪽 위 크기 조절',
+    ]) {
+      expect(screen.getByRole('button', { name: label })).toBeVisible();
     }
 
     const east = container.querySelector<HTMLElement>('[data-handle="e"]');
@@ -120,6 +129,28 @@ describe('capture overlay', () => {
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith('complete_selection', {
         rect: { x: -2360, y: 480, width: 900, height: 600 },
+      });
+    });
+  });
+
+  it('moves and resizes by Arrow keys with Shift acceleration, then confirms globally', async () => {
+    render(<Overlay />);
+    await screen.findByTestId('selection-cutout');
+    const move = screen.getByRole('button', { name: '캡처 영역 이동' });
+    const east = screen.getByRole('button', { name: '오른쪽 크기 조절' });
+
+    move.focus();
+    expect(move).toHaveFocus();
+    fireEvent.keyDown(move, { key: 'ArrowRight' });
+    fireEvent.keyDown(move, { key: 'ArrowDown', shiftKey: true });
+    east.focus();
+    expect(east).toHaveFocus();
+    fireEvent.keyDown(east, { key: 'ArrowRight', shiftKey: true });
+    fireEvent.keyDown(east, { key: 'Enter' });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('complete_selection', {
+        rect: { x: -2358, y: 500, width: 820, height: 600 },
       });
     });
   });
@@ -181,7 +212,7 @@ describe('capture overlay', () => {
     fireEvent.keyDown(window, { key: 'Enter' });
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(invokeMock).not.toHaveBeenCalledWith('complete_selection', expect.anything());
-    expect(invokeMock).not.toHaveBeenCalledWith('cancel_selection');
+    expect(invokeMock).toHaveBeenCalledWith('cancel_selection');
   });
 
   it('ignores pointer and keyboard input while overlay metadata is loading', async () => {
@@ -216,15 +247,32 @@ describe('capture overlay', () => {
     fireEvent.keyDown(window, { key: 'Enter' });
     fireEvent.keyDown(window, { key: 'Escape' });
 
-    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(invokeMock).toHaveBeenCalledTimes(2);
     expect(invokeMock).toHaveBeenCalledWith('get_overlay_info');
+    expect(invokeMock).toHaveBeenCalledWith('cancel_selection');
     expect(screen.queryByTestId('selection-cutout')).not.toBeInTheDocument();
 
     await act(async () => {
       resolveInfo(fixedOverlayInfo);
       await deferred;
     });
-    expect(await screen.findByTestId('selection-cutout')).toBeVisible();
+    expect(screen.queryByTestId('selection-cutout')).not.toBeInTheDocument();
+  });
+
+  it('still sends Escape cancellation after metadata loading fails', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'get_overlay_info') {
+        return Promise.reject(new Error('metadata unavailable'));
+      }
+      return Promise.resolve(undefined);
+    });
+    render(<Overlay />);
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('get_overlay_info'));
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+
+    expect(invokeMock).toHaveBeenCalledWith('cancel_selection');
+    expect(invokeMock).not.toHaveBeenCalledWith('complete_selection', expect.anything());
   });
 
   it('keeps the dimension badge visible when the region touches every display edge', async () => {

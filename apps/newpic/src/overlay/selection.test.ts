@@ -78,6 +78,25 @@ describe('selection reducer and coordinate helpers', () => {
     expect(confirmed).toBe(initial);
   });
 
+  it('keeps pre-load Escape cancellation terminal when metadata arrives late', () => {
+    const initial = initialSelectionState({
+      mode: 'free_region',
+      displayBounds: defaultDisplay,
+    });
+    const cancelled = selectionReducer(initial, { type: 'CANCEL' });
+    const lateLoad = selectionReducer(cancelled, {
+      type: 'LOAD_OVERLAY',
+      mode: 'fixed_size',
+      displayBounds: defaultDisplay,
+      activeDisplay: true,
+      rect: { x: 100, y: 100, width: 800, height: 600 },
+    });
+
+    expect(cancelled.status).toBe('cancelled');
+    expect(lateLoad).toBe(cancelled);
+    expect(lateLoad.currentRect).toBeNull();
+  });
+
   it('does not initialize or confirm F9 on an inactive display', () => {
     let state = selectionReducer(
       initialSelectionState({ mode: 'free_region', displayBounds: defaultDisplay }),
@@ -153,6 +172,33 @@ describe('selection reducer and coordinate helpers', () => {
 
     expect(state.currentRect).toEqual({ x: 400, y: 320, width: 800, height: 600 });
     expect(state.status).toBe('selecting');
+  });
+
+  it('moves and resizes F9 from explicit keyboard adjustments', () => {
+    let state = loadFixed({ x: 100, y: 100, width: 200, height: 100 });
+    state = selectionReducer(state, {
+      type: 'KEYBOARD_ADJUST',
+      target: 'rect',
+      dx: -150,
+      dy: 10,
+    });
+    expect(state.currentRect).toEqual({ x: 0, y: 110, width: 200, height: 100 });
+
+    state = selectionReducer(state, {
+      type: 'KEYBOARD_ADJUST',
+      target: 'e',
+      dx: 10,
+      dy: 0,
+    });
+    expect(state.currentRect).toEqual({ x: 0, y: 110, width: 210, height: 100 });
+
+    state = selectionReducer(state, {
+      type: 'KEYBOARD_ADJUST',
+      target: 'nw',
+      dx: 10,
+      dy: 10,
+    });
+    expect(state.currentRect).toEqual({ x: 10, y: 120, width: 200, height: 90 });
   });
 
   it.each<[ResizeHandle, { x: number; y: number }, Rect]>([

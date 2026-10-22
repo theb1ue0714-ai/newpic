@@ -74,6 +74,12 @@ export type SelectionAction =
   | { type: 'POINTER_MOVE'; point: Point }
   | { type: 'POINTER_UP'; point?: Point }
   | { type: 'POINTER_CANCEL' }
+  | {
+      type: 'KEYBOARD_ADJUST';
+      target: 'rect' | ResizeHandle;
+      dx: number;
+      dy: number;
+    }
   | { type: 'CONFIRM' }
   | { type: 'CANCEL' }
   | { type: 'RESET' };
@@ -237,7 +243,15 @@ export function selectionReducer(
   state: SelectionState,
   action: SelectionAction
 ): SelectionState {
-  if (action.type !== 'LOAD_OVERLAY' && action.type !== 'RESET' && !state.ready) {
+  if (action.type === 'LOAD_OVERLAY' && state.status === 'cancelled') {
+    return state;
+  }
+  if (
+    action.type !== 'LOAD_OVERLAY' &&
+    action.type !== 'RESET' &&
+    action.type !== 'CANCEL' &&
+    !state.ready
+  ) {
     return state;
   }
 
@@ -381,6 +395,42 @@ export function selectionReducer(
         status: 'idle',
         interaction: null,
         currentPoint: null,
+      };
+    }
+
+    case 'KEYBOARD_ADJUST': {
+      if (
+        state.mode !== 'fixed_size' ||
+        !state.activeDisplay ||
+        !state.currentRect
+      ) {
+        return state;
+      }
+      const currentRect =
+        action.target === 'rect'
+          ? clampFixedRect(
+              {
+                ...state.currentRect,
+                x: state.currentRect.x + action.dx,
+                y: state.currentRect.y + action.dy,
+              },
+              state.displayBounds
+            )
+          : resizeFixedRect(
+              {
+                kind: 'resize',
+                handle: action.target,
+                pointerStart: { x: 0, y: 0 },
+                rectStart: state.currentRect,
+              },
+              { x: action.dx, y: action.dy },
+              state.displayBounds
+            );
+      return {
+        ...state,
+        status: 'idle',
+        currentRect,
+        interaction: null,
       };
     }
 

@@ -183,7 +183,14 @@ Replace the old click-to-complete F9 tests with focused tests for:
 - north, south, east, west, and all four corner handles resize correctly;
 - reverse-direction resizing stops at minimum 1×1 instead of flipping handles;
 - move and resize clamp to display-local logical bounds;
+- Arrow keys move or resize the focused semantic control by one logical pixel,
+  Shift+Arrow uses ten pixels, and the same reducer clamps both pointer and
+  keyboard adjustments;
 - pointer-up ends interaction but does not complete selection;
+- pointer cancel and lost pointer capture end interaction without completing;
+- pointer and Enter input are ignored until metadata is ready and on inactive
+  fixed-region overlay windows, while Escape always cancels even during load
+  or after metadata failure;
 - `CONFIRM` completes only when a valid F9 rectangle exists;
 - Escape restores no new value and keeps the previously persisted rectangle outside reducer state;
 - F7 continues completing on pointer-up exactly as before.
@@ -197,11 +204,13 @@ export type FixedInteraction =
   | { kind: 'resize'; handle: ResizeHandle; pointerStart: Point; rectStart: Rect };
 
 export type SelectionAction =
-  | { type: 'LOAD_OVERLAY'; mode: SelectionMode; displayBounds: DisplayBounds; rect?: Rect }
+  | { type: 'LOAD_OVERLAY'; mode: SelectionMode; displayBounds: DisplayBounds; activeDisplay: boolean; rect?: Rect }
   | { type: 'INITIALIZE_FIXED'; rect: Rect }
   | { type: 'POINTER_DOWN'; point: Point; target?: 'rect' | ResizeHandle }
   | { type: 'POINTER_MOVE'; point: Point }
   | { type: 'POINTER_UP'; point?: Point }
+  | { type: 'POINTER_CANCEL' }
+  | { type: 'KEYBOARD_ADJUST'; target: 'rect' | ResizeHandle; dx: number; dy: number }
   | { type: 'CONFIRM' }
   | { type: 'CANCEL' };
 ```
@@ -216,14 +225,27 @@ Expected: old pointer-follow/click behavior fails the new assertions.
 
 **Step 3: Implement minimal reducer behavior**
 
-Use `LOAD_OVERLAY` after the Tauri request returns so reducer mode, display bounds, scale factor, and initial rectangle cannot remain at their pre-request defaults. Keep F7 branches unchanged. For F9, store `interaction` separately, calculate movement from `rectStart`, and calculate each resize edge from the same immutable start rectangle. Clamp before returning the next state. Only `CONFIRM` sets `status: 'completed'`.
+Use `LOAD_OVERLAY` after the Tauri request returns so reducer mode, display bounds, scale factor, active-display state, and initial rectangle cannot remain at their pre-request defaults. Keep explicit `ready` and `activeDisplay` state. Ignore pointer and Enter before load or on inactive F9 windows, but allow `CANCEL` before load and make it terminal so a late metadata response cannot revive the overlay. Keep F7 branches unchanged. For F9, store `interaction` separately, calculate movement from `rectStart`, and calculate each resize edge from the same immutable start rectangle. Clamp pointer and keyboard adjustments through the same geometry functions. Only `CONFIRM` sets `status: 'completed'`.
 
 **Step 4: Wire the overlay UI**
 
 - Initialize F9 from `OverlayInfo.initial_rect`; otherwise center `fixed_size` in the current display.
-- Render one move surface plus eight semantic resize handles with `data-handle` and appropriate CSS cursors.
+- Treat `OverlayInfo.active_display` as required. Render and operate F9 only
+  when its value is exactly `true`; never infer that a missing value means
+  active.
+- Render one focusable, named move control plus eight focusable, named resize
+  controls with `data-handle`, screen-reader labels, visible focus, and
+  appropriate CSS cursors.
+- Arrow keys adjust the focused control by one local logical pixel and
+  Shift+Arrow by ten. Use non-native-button controls or suppress native button
+  activation so Enter produces exactly one global confirmation.
 - Use pointer capture so a fast drag does not lose the interaction.
-- Add Enter handling that dispatches `CONFIRM`; keep Escape cancellation.
+- Release pointer capture on pointer-up, pointer cancel, lost capture, Enter,
+  and Escape. Add Enter handling that dispatches `CONFIRM` only on the active
+  ready F9 overlay. Escape must always call `cancel_selection`, including
+  while metadata is loading, after metadata failure, or on an inactive window.
+- Render the dimensions badge as an overlay-level sibling and clamp its
+  position so it remains visible at every display edge.
 - Change the instruction to: `드래그하여 이동 · 모서리/테두리로 크기 조절 · Enter 캡처 · Esc 취소`.
 - Do not invoke `complete_selection` until reducer status becomes completed through Enter.
 - Convert between display-local logical coordinates and global physical coordinates by applying both scale and the display physical origin; do not merely multiply by scale.
@@ -255,6 +277,7 @@ git commit -m "feat: make F9 region movable and resizable"
 - Modify: `apps/newpic/src-tauri/src/commands.rs`
 - Modify: `apps/newpic/src-tauri/tests/overlay_state.rs`
 - Modify: `apps/newpic/src-tauri/tests/hotkey_mapping.rs`
+- Create: `apps/newpic/src-tauri/tests/overlay_windowing.rs`
 
 **Step 1: Write failing coordinator and command-level tests**
 
@@ -269,11 +292,23 @@ Tests must prove:
 - successful Enter persists geometry before capture and updates `fixed_region` width/height.
 - saving changed width/height from Settings calls `SavedFixedRegion::with_size`, preserves the stored top-left where valid, and clamps it without changing F8.
 - each overlay window receives its own display bounds rather than always using the primary display.
+- `get_overlay_info` maps the calling `overlay-N` window label to exactly one
+  display and returns `active_display: true` only for the F9 display that owns
+  `initial_rect`; missing or malformed overlay labels return a typed error.
+- F7 overlay responses set `active_display: true` because every display-local
+  free-region overlay remains eligible for pointer selection.
+- overlay window creation builds every native overlay first, never focuses
+  each window inside the creation loop, then focuses exactly the active F9
+  overlay after all windows exist.
+- window-label/focus integration tests record build and focus events and prove
+  that the active F9 label is focused once and only after the final overlay
+  build; inactive labels are never focused.
 
 **Step 2: Verify RED**
 
 ```bash
 cargo test -p newpic-desktop --test overlay_state -- --nocapture
+cargo test -p newpic-desktop --test overlay_windowing -- --nocapture
 ```
 
 Expected: FAIL on action separation and persistence assertions.
@@ -299,11 +334,25 @@ pub struct OverlayInfo {
     pub request: SelectionRequest,
     pub display_bounds: PhysicalRectDto,
     pub scale_factor: f64,
+    pub active_display: bool,
     pub initial_rect: Option<PhysicalRectDto>,
 }
 ```
 
-Only the overlay whose display fully contains `initial_rect` receives it.
+Only the overlay whose display fully contains `initial_rect` receives it and
+returns `active_display: true`; all other F9 windows must return
+`active_display: false` and `initial_rect: None`. `active_display` is a required
+wire-contract field, not an optional compatibility hint.
+
+Refactor `open_overlays` so window construction and focus selection are
+separate phases. Build all `overlay-N` windows, determine the active label from
+the same display mapping used by `get_overlay_info`, and only then call
+`set_focus` once on that window. Do not focus windows as they are created,
+because the last-created inactive window can otherwise steal Enter/Escape.
+Expose the label-to-display and focus-plan logic behind testable helpers or a
+recording window-factory boundary. `overlay_windowing.rs` must exercise the
+real orchestration boundary with recorded build/focus order, not merely assert
+an independently duplicated expected label.
 
 **Step 5: Persist before capture**
 
@@ -323,6 +372,7 @@ In the existing `persist_settings` path, compare requested `fixed_region` dimens
 
 ```bash
 cargo test -p newpic-desktop --test overlay_state
+cargo test -p newpic-desktop --test overlay_windowing
 cargo test -p newpic-desktop --test hotkey_mapping
 cargo test -p newpic-desktop
 ```
