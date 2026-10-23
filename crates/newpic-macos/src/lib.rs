@@ -470,12 +470,11 @@ mod platform {
     pub(super) fn displays() -> Result<Vec<Display>, CaptureError> {
         native_displays().map(|v| v.into_iter().map(|(_, d)| d).collect())
     }
-    fn filter(display: &SCDisplay) -> Result<SCContentFilter, CaptureError> {
+    fn filter(display: &SCDisplay) -> SCContentFilter {
         SCContentFilter::create()
             .with_display(display)
             .with_excluding_windows(&[])
             .build()
-            .map_err(error)
     }
     fn frame(
         filter: &SCContentFilter,
@@ -485,15 +484,15 @@ mod platform {
         cursor: bool,
     ) -> Result<Frame, CaptureError> {
         let mut config = SCStreamConfiguration::new()
-            .with_width(width as usize)
-            .with_height(height as usize)
+            .with_width(width)
+            .with_height(height)
             .with_pixel_format(PixelFormat::BGRA)
             .with_shows_cursor(cursor);
         if let Some(rect) = rect {
             config = config.with_source_rect(rect);
         }
         let (tx, rx) = mpsc::sync_channel(1);
-        let mut stream = SCStream::new(filter, &config).map_err(error)?;
+        let mut stream = SCStream::new(filter, &config);
         stream
             .add_output_handler(
                 move |sample, kind| {
@@ -521,7 +520,9 @@ mod platform {
                 },
                 SCStreamOutputType::Screen,
             )
-            .map_err(error)?;
+            .ok_or_else(|| {
+                CaptureError::Backend("failed to register ScreenCaptureKit output handler".into())
+            })?;
         stream.start_capture().map_err(error)?;
         let received = rx.recv_timeout(Duration::from_secs(5));
         let stopped = stream.stop_capture().map_err(error);
@@ -548,7 +549,7 @@ mod platform {
             .find(|(_, d)| d.id() == id)
             .ok_or_else(|| CaptureError::DisplayNotFound(id.clone()))?;
         let (w, h, pixels) = rgba(frame(
-            &filter(native)?,
+            &filter(native),
             d.bounds().size().width(),
             d.bounds().size().height(),
             None,
@@ -588,7 +589,7 @@ mod platform {
                 piece.size().height() as f64 / scale,
             );
             let (w, h, pixels) = rgba(frame(
-                &filter(native)?,
+                &filter(native),
                 piece.size().width(),
                 piece.size().height(),
                 Some(source),
