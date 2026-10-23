@@ -837,8 +837,7 @@ pub fn intersections_with_displays(
         .collect()
 }
 
-/// Builds an F9 rectangle centered at `pointer`, reduced and repositioned so
-/// it is wholly contained by the selected display.
+/// Validation failures for physical display and capture geometry.
 #[derive(Debug, Clone, PartialEq, Error)]
 pub enum GeometryError {
     #[error("physical size must be non-zero, got {width} by {height}")]
