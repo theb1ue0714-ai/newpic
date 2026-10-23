@@ -3,6 +3,10 @@ all-features = true
 
 [advisories]
 yanked = "deny"
+# Tauri's Linux stack currently brings several RustSec-unmaintained crates
+# transitively with no safe upgrade path. Keep direct unmaintained dependencies
+# and every vulnerability/unsound advisory as errors.
+unmaintained = "workspace"
 
 [licenses]
 confidence-threshold = 0.8
