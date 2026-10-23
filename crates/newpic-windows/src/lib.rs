@@ -343,7 +343,7 @@ mod platform {
     impl Drop for MemoryDc {
         fn drop(&mut self) {
             unsafe {
-                DeleteDC(self.0);
+                let _ = DeleteDC(self.0);
             }
         }
     }
@@ -353,7 +353,7 @@ mod platform {
     impl Drop for OwnedBitmap {
         fn drop(&mut self) {
             unsafe {
-                DeleteObject(self.0.into());
+                let _ = DeleteObject(self.0.into());
             }
         }
     }
@@ -429,21 +429,23 @@ mod platform {
         let mut selection = SelectedObject::new(memory.0, bitmap.0.into())?;
 
         let copied = if print_window {
-            unsafe { PrintWindow(source_window, memory.0, PRINT_WINDOW_FLAGS(2)).as_bool() }
-            || unsafe {
-                BitBlt(
-                    memory.0,
-                    0,
-                    0,
-                    width_i32,
-                    height_i32,
-                    Some(source.dc),
-                    source_x,
-                    source_y,
-                    SRCCOPY,
-                )
-                .is_ok()
-            }
+            let print_succeeded =
+                unsafe { PrintWindow(source_window, memory.0, PRINT_WINDOW_FLAGS(2)).as_bool() };
+            print_succeeded
+                || unsafe {
+                    BitBlt(
+                        memory.0,
+                        0,
+                        0,
+                        width_i32,
+                        height_i32,
+                        Some(source.dc),
+                        source_x,
+                        source_y,
+                        SRCCOPY,
+                    )
+                    .is_ok()
+                }
         } else {
             unsafe {
                 BitBlt(
