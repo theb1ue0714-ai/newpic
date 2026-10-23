@@ -74,9 +74,17 @@ pub fn apply_default_preset<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, AppState>,
 ) -> Result<SaveSettingsResponse, CommandError> {
-    let response = persist_settings(&app, &state, Settings::default(), false)?;
+    let response = apply_default_preset_service(|settings, preserve_saved_geometry| {
+        persist_settings(&app, &state, settings, preserve_saved_geometry)
+    })?;
     state.record(EventLevel::Info, "default preset reapplied");
     Ok(response)
+}
+
+pub fn apply_default_preset_service<T>(
+    persist: impl FnOnce(Settings, bool) -> Result<T, CommandError>,
+) -> Result<T, CommandError> {
+    persist(Settings::default(), false)
 }
 
 /// Sets a custom save folder chosen by the user. The path is validated by the
@@ -107,8 +115,16 @@ pub fn get_overlay_info<R: Runtime>(
         .active_request()
         .cloned()
         .ok_or_else(|| CommandError::new("no active selection request"))?;
-    overlay::overlay_info_for_label(window.label(), &request, coordinator.active_displays())
-        .map_err(CommandError::new)
+    let session_id = coordinator
+        .active_session_id()
+        .ok_or_else(|| CommandError::new("no active overlay session"))?;
+    overlay::overlay_info_for_label(
+        window.label(),
+        session_id,
+        &request,
+        coordinator.active_displays(),
+    )
+    .map_err(CommandError::new)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -182,6 +198,10 @@ pub fn complete_selection<R: Runtime>(
             .map_err(|error| CommandError::new(format!("could not query displays: {error}")))?;
         let mut settings_transaction = state.settings_transaction();
         let current_settings = settings_transaction.clone();
+        let overlay_guard = lock(&state.overlay);
+        let overlay_labels = overlay_guard.overlay_labels();
+        let active_label = overlay_guard.active_overlay_label();
+        drop(overlay_guard);
         complete_selection_with_effects(
             &mut lock(&state.overlay),
             &current_settings,
@@ -194,7 +214,10 @@ pub fn complete_selection<R: Runtime>(
                         *settings_transaction = committed.settings.clone();
                     }
                 },
-                || overlay::close_overlays(&app).map_err(CommandError::new),
+                || {
+                    overlay::close_overlays(&app, &overlay_labels, active_label.as_deref())
+                        .map_err(CommandError::new)
+                },
                 || dispatch_region_capture(app.clone(), physical_rect, reservation),
             ),
         )?;
@@ -233,8 +256,12 @@ pub fn cancel_selection<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    let closed = overlay::close_overlays(&app).map_err(CommandError::new);
-    lock(&state.overlay).cancel();
+    let mut coordinator = lock(&state.overlay);
+    let labels = coordinator.overlay_labels();
+    let active_label = coordinator.active_overlay_label();
+    let closed =
+        overlay::close_overlays(&app, &labels, active_label.as_deref()).map_err(CommandError::new);
+    coordinator.cancel();
     state.record(EventLevel::Info, "selection cancelled");
     closed
 }
@@ -473,7 +500,9 @@ pub fn run_action<R: Runtime>(app: &AppHandle<R>, action: CaptureAction) {
                 &mut overlay,
                 request,
                 selection_displays,
-                |request, displays| overlay::open_overlays(app, request, displays),
+                |session_id, request, displays| {
+                    overlay::open_overlays(app, session_id, request, displays)
+                },
             );
             if let Err(error) = result {
                 let level = if error == OverlayError::AlreadyActive {

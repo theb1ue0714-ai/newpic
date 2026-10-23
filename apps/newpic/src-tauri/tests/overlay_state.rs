@@ -11,8 +11,8 @@ use newpic_desktop_lib::app_state::{
     plan_capture, AppPaths, AppState, CaptureGate, CapturePlan, SelectionMode, SelectionRequest,
 };
 use newpic_desktop_lib::commands::{
-    complete_selection_with_effects, merge_read_only_saved_geometry, persist_settings_and_replace,
-    prepare_settings_for_save, with_capture_reservation,
+    apply_default_preset_service, complete_selection_with_effects, merge_read_only_saved_geometry,
+    persist_settings_and_replace, prepare_settings_for_save, with_capture_reservation,
 };
 use newpic_desktop_lib::hotkeys::CaptureAction;
 use newpic_desktop_lib::overlay::{
@@ -415,12 +415,15 @@ fn command_service_default_reset_clears_f9_and_never_deletes_images() {
     };
     let state = real_state(temp.path(), previous.clone());
     state.repository.save(&previous).unwrap();
-    let reset = persist_settings_and_replace(
-        &state.repository,
-        &mut state.settings_transaction(),
-        Settings::default(),
-        &displays,
-    )
+    let reset = apply_default_preset_service(|settings, preserve_saved_geometry| {
+        assert!(!preserve_saved_geometry);
+        persist_settings_and_replace(
+            &state.repository,
+            &mut state.settings_transaction(),
+            settings,
+            &displays,
+        )
+    })
     .unwrap();
 
     assert_eq!(reset.fixed_region, Size::new(800, 600));
@@ -519,11 +522,12 @@ fn selection_session_keeps_one_display_snapshot_and_cancels_on_open_failure() {
         &mut coordinator,
         request.clone(),
         original.clone(),
-        |_, _| Ok(()),
+        |_, _, _| Ok(()),
     )
     .unwrap();
     let info = overlay_info_for_label(
-        "overlay-0",
+        "overlay-1-0",
+        coordinator.active_session_id().unwrap(),
         coordinator.active_request().unwrap(),
         coordinator.active_displays(),
     )
@@ -532,7 +536,7 @@ fn selection_session_keeps_one_display_snapshot_and_cancels_on_open_failure() {
     assert_ne!(info.display_bounds, reordered[0].bounds().into());
     coordinator.cancel();
 
-    let error = start_overlay_session(&mut coordinator, request, original, |_, _| {
+    let error = start_overlay_session(&mut coordinator, request, original, |_, _, _| {
         Err(OverlayError::Window("focus failed".into()))
     });
     assert!(error.is_err());
@@ -550,7 +554,7 @@ fn completion_revalidates_current_topology_after_snapshotted_display_is_removed(
         &mut coordinator,
         request(CaptureAction::FixedRegion, Some(rect)),
         original,
-        |_, _| Ok(()),
+        |_, _, _| Ok(()),
     )
     .unwrap();
     let repository = RecordingRepository::default();
@@ -582,7 +586,13 @@ fn mirrored_f9_persists_the_explicitly_selected_display() {
         selected_display_id: Some("second".into()),
     };
     let mut coordinator = OverlayCoordinator::new();
-    start_overlay_session(&mut coordinator, request, displays.clone(), |_, _| Ok(())).unwrap();
+    start_overlay_session(
+        &mut coordinator,
+        request,
+        displays.clone(),
+        |_, _, _| Ok(()),
+    )
+    .unwrap();
     let repository = RecordingRepository::default();
     let committed = complete_selection_with_effects(
         &mut coordinator,

@@ -50,6 +50,8 @@ pub struct OverlayCoordinator {
     active_request: Option<SelectionRequest>,
     active_displays: Vec<Display>,
     last_region: Option<PhysicalRect>,
+    next_session_id: u64,
+    active_session_id: Option<u64>,
 }
 
 impl OverlayCoordinator {
@@ -58,6 +60,8 @@ impl OverlayCoordinator {
             active_request: None,
             active_displays: Vec::new(),
             last_region: None,
+            next_session_id: 0,
+            active_session_id: None,
         }
     }
 
@@ -69,7 +73,7 @@ impl OverlayCoordinator {
         self.active_request.as_ref()
     }
 
-    pub fn start_selection(&mut self, request: SelectionRequest) -> Result<(), OverlayError> {
+    pub fn start_selection(&mut self, request: SelectionRequest) -> Result<u64, OverlayError> {
         self.start_selection_with_displays(request, Vec::new())
     }
 
@@ -77,22 +81,48 @@ impl OverlayCoordinator {
         &mut self,
         request: SelectionRequest,
         displays: Vec<Display>,
-    ) -> Result<(), OverlayError> {
+    ) -> Result<u64, OverlayError> {
         if self.is_active() {
             return Err(OverlayError::AlreadyActive);
         }
         self.active_request = Some(request);
         self.active_displays = displays;
-        Ok(())
+        self.next_session_id = self.next_session_id.wrapping_add(1).max(1);
+        self.active_session_id = Some(self.next_session_id);
+        Ok(self.next_session_id)
     }
 
     pub fn active_displays(&self) -> &[Display] {
         &self.active_displays
     }
 
+    pub fn active_session_id(&self) -> Option<u64> {
+        self.active_session_id
+    }
+
+    pub fn overlay_labels(&self) -> Vec<String> {
+        self.active_session_id.map_or_else(Vec::new, |session| {
+            (0..self.active_displays.len())
+                .map(|index| overlay_label(session, index))
+                .collect()
+        })
+    }
+
+    pub fn active_overlay_label(&self) -> Option<String> {
+        let session = self.active_session_id?;
+        let request = self.active_request.as_ref()?;
+        let index = if request.mode == SelectionMode::FixedSize {
+            active_fixed_display_index(request, &self.active_displays).ok()?
+        } else {
+            0
+        };
+        Some(overlay_label(session, index))
+    }
+
     pub fn cancel(&mut self) {
         self.active_request = None;
         self.active_displays.clear();
+        self.active_session_id = None;
         // Preserves last_region for F8 repeat
     }
 
@@ -102,6 +132,7 @@ impl OverlayCoordinator {
             .take()
             .ok_or(OverlayError::NoActiveSelection)?;
         self.active_displays.clear();
+        self.active_session_id = None;
         if request.action == CaptureAction::Region {
             self.last_region = Some(rect);
         }
@@ -136,23 +167,28 @@ pub fn start_overlay_session(
     coordinator: &mut OverlayCoordinator,
     request: SelectionRequest,
     displays: Vec<Display>,
-    open: impl FnOnce(&SelectionRequest, &[Display]) -> Result<(), OverlayError>,
+    open: impl FnOnce(u64, &SelectionRequest, &[Display]) -> Result<(), OverlayError>,
 ) -> Result<(), OverlayError> {
-    coordinator.start_selection_with_displays(request.clone(), displays.clone())?;
-    if let Err(error) = open(&request, &displays) {
+    let session_id =
+        coordinator.start_selection_with_displays(request.clone(), displays.clone())?;
+    if let Err(error) = open(session_id, &request, &displays) {
         coordinator.cancel();
         return Err(error);
     }
     Ok(())
 }
 
+pub fn overlay_label(session_id: u64, index: usize) -> String {
+    format!("{OVERLAY_WINDOW_PREFIX}{session_id}-{index}")
+}
+
 fn display_contains(display: &Display, rect: PhysicalRect) -> bool {
     display.bounds().intersection(rect) == Some(rect)
 }
 
-fn display_index_from_label(label: &str) -> Result<usize, OverlayError> {
+fn display_index_from_label(label: &str, session_id: u64) -> Result<usize, OverlayError> {
     let suffix = label
-        .strip_prefix(OVERLAY_WINDOW_PREFIX)
+        .strip_prefix(&format!("{OVERLAY_WINDOW_PREFIX}{session_id}-"))
         .ok_or_else(|| OverlayError::InvalidWindowLabel(label.to_owned()))?;
     if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(OverlayError::InvalidWindowLabel(label.to_owned()));
@@ -160,7 +196,7 @@ fn display_index_from_label(label: &str) -> Result<usize, OverlayError> {
     let index: usize = suffix
         .parse()
         .map_err(|_| OverlayError::InvalidWindowLabel(label.to_owned()))?;
-    if label != format!("{OVERLAY_WINDOW_PREFIX}{index}") {
+    if label != overlay_label(session_id, index) {
         return Err(OverlayError::InvalidWindowLabel(label.to_owned()));
     }
     Ok(index)
@@ -192,10 +228,11 @@ fn active_fixed_display_index(
 
 pub fn overlay_info_for_label(
     label: &str,
+    session_id: u64,
     request: &SelectionRequest,
     displays: &[Display],
 ) -> Result<OverlayInfo, OverlayError> {
-    let index = display_index_from_label(label)?;
+    let index = display_index_from_label(label, session_id)?;
     let display = displays
         .get(index)
         .ok_or(OverlayError::DisplayIndexOutOfRange(index))?;
@@ -238,13 +275,14 @@ fn cleanup_after_failure(
 }
 
 pub fn create_overlay_windows(
+    session_id: u64,
     request: &SelectionRequest,
     displays: &[Display],
     factory: &mut impl OverlayWindowFactory,
 ) -> Result<(), OverlayError> {
     let mut built: Vec<String> = Vec::new();
     for (index, display) in displays.iter().enumerate() {
-        let label = format!("{OVERLAY_WINDOW_PREFIX}{index}");
+        let label = overlay_label(session_id, index);
         if let Err(error) = factory.build(&label, display) {
             let labels = std::iter::once(label).chain(built.into_iter().rev());
             return Err(cleanup_after_failure(factory, labels, error));
@@ -263,7 +301,7 @@ pub fn create_overlay_windows(
                 ));
             }
         };
-        if let Err(error) = factory.focus(&format!("{OVERLAY_WINDOW_PREFIX}{active}")) {
+        if let Err(error) = factory.focus(&overlay_label(session_id, active)) {
             return Err(cleanup_after_failure(
                 factory,
                 built.into_iter().rev(),
@@ -329,6 +367,7 @@ impl<R: Runtime> OverlayWindowFactory for TauriOverlayWindowFactory<'_, R> {
 /// Spawns transparent borderless always-on-top overlay windows across attached displays.
 pub fn open_overlays<R: Runtime>(
     app: &AppHandle<R>,
+    session_id: u64,
     request: &SelectionRequest,
     displays: &[Display],
 ) -> Result<(), OverlayError> {
@@ -337,8 +376,16 @@ pub fn open_overlays<R: Runtime>(
         return Err(OverlayError::Window("no displays detected".into()));
     }
 
+    let current_prefix = format!("{OVERLAY_WINDOW_PREFIX}{session_id}-");
+    for (label, window) in app.webview_windows() {
+        if label.starts_with(OVERLAY_WINDOW_PREFIX) && !label.starts_with(&current_prefix) {
+            let _ = window.hide();
+            let _ = window.close();
+        }
+    }
+
     let mut factory = TauriOverlayWindowFactory { app };
-    if let Err(error) = create_overlay_windows(request, displays, &mut factory) {
+    if let Err(error) = create_overlay_windows(session_id, request, displays, &mut factory) {
         state.record(
             EventLevel::Error,
             format!("failed to create overlay windows: {error}"),
@@ -349,7 +396,6 @@ pub fn open_overlays<R: Runtime>(
 }
 
 pub trait OverlayWindowCloser {
-    fn labels(&self) -> Vec<String>;
     fn hide(&mut self, label: &str) -> Result<(), OverlayError>;
     fn show(&mut self, label: &str) -> Result<(), OverlayError>;
     fn focus(&mut self, label: &str) -> Result<(), OverlayError>;
@@ -358,21 +404,22 @@ pub trait OverlayWindowCloser {
     fn wait_for_state_change(&mut self);
 }
 
-pub fn close_overlay_windows(closer: &mut impl OverlayWindowCloser) -> Result<(), OverlayError> {
-    let labels: Vec<_> = closer
-        .labels()
-        .into_iter()
-        .filter(|label| label.starts_with(OVERLAY_WINDOW_PREFIX))
-        .collect();
+pub fn close_overlay_windows(
+    closer: &mut impl OverlayWindowCloser,
+    labels: &[String],
+    active_label: Option<&str>,
+) -> Result<(), OverlayError> {
     let mut hidden: Vec<String> = Vec::new();
-    for label in &labels {
+    for label in labels {
         if let Err(error) = closer.hide(label) {
             let mut restore_errors = Vec::new();
             for hidden_label in &hidden {
                 if let Err(restore) = closer.show(hidden_label) {
                     restore_errors.push(restore.to_string());
                 }
-                if let Err(restore) = closer.focus(hidden_label) {
+            }
+            if let Some(active_label) = active_label {
+                if let Err(restore) = closer.focus(active_label) {
                     restore_errors.push(restore.to_string());
                 }
             }
@@ -394,7 +441,7 @@ pub fn close_overlay_windows(closer: &mut impl OverlayWindowCloser) -> Result<()
             .cloned()
             .collect();
         if visible.is_empty() {
-            for label in &labels {
+            for label in labels {
                 closer.close_best_effort(label);
             }
             return Ok(());
@@ -409,11 +456,13 @@ pub fn close_overlay_windows(closer: &mut impl OverlayWindowCloser) -> Result<()
             .collect(),
     );
     let mut restore_errors = Vec::new();
-    for label in &labels {
+    for label in labels {
         if let Err(error) = closer.show(label) {
             restore_errors.push(error.to_string());
         }
-        if let Err(error) = closer.focus(label) {
+    }
+    if let Some(active_label) = active_label {
+        if let Err(error) = closer.focus(active_label) {
             restore_errors.push(error.to_string());
         }
     }
@@ -432,10 +481,6 @@ struct TauriOverlayWindowCloser<'a, R: Runtime> {
 }
 
 impl<R: Runtime> OverlayWindowCloser for TauriOverlayWindowCloser<'_, R> {
-    fn labels(&self) -> Vec<String> {
-        self.app.webview_windows().into_keys().collect()
-    }
-
     fn hide(&mut self, label: &str) -> Result<(), OverlayError> {
         match self.app.get_webview_window(label) {
             Some(window) => window
@@ -483,6 +528,10 @@ impl<R: Runtime> OverlayWindowCloser for TauriOverlayWindowCloser<'_, R> {
 
 /// Requests closure and polls the native window registry until every overlay
 /// is actually gone, so no overlay pixels can leak into the capture.
-pub fn close_overlays<R: Runtime>(app: &AppHandle<R>) -> Result<(), OverlayError> {
-    close_overlay_windows(&mut TauriOverlayWindowCloser { app })
+pub fn close_overlays<R: Runtime>(
+    app: &AppHandle<R>,
+    labels: &[String],
+    active_label: Option<&str>,
+) -> Result<(), OverlayError> {
+    close_overlay_windows(&mut TauriOverlayWindowCloser { app }, labels, active_label)
 }

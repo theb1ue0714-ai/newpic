@@ -2,9 +2,39 @@ use newpic_core::settings::Size;
 use newpic_desktop_lib::app_state::{SelectionMode, SelectionRequest};
 use newpic_desktop_lib::hotkeys::CaptureAction;
 use newpic_desktop_lib::overlay::{
-    close_overlay_windows, create_overlay_windows, overlay_info_for_label, OverlayError,
-    OverlayWindowCloser, OverlayWindowFactory, PhysicalRectDto,
+    close_overlay_windows as close_session_windows,
+    create_overlay_windows as create_session_windows,
+    overlay_info_for_label as session_overlay_info, OverlayError, OverlayWindowCloser,
+    OverlayWindowFactory, PhysicalRectDto,
 };
+
+fn create_overlay_windows(
+    request: &SelectionRequest,
+    displays: &[Display],
+    factory: &mut impl OverlayWindowFactory,
+) -> Result<(), OverlayError> {
+    create_session_windows(1, request, displays, factory)
+}
+
+fn overlay_info_for_label(
+    label: &str,
+    request: &SelectionRequest,
+    displays: &[Display],
+) -> Result<newpic_desktop_lib::overlay::OverlayInfo, OverlayError> {
+    let index = label.strip_prefix("overlay-").unwrap_or(label);
+    session_overlay_info(&format!("overlay-1-{index}"), 1, request, displays)
+}
+
+fn close_overlay_windows(closer: &mut RecordingCloser) -> Result<(), OverlayError> {
+    let labels = closer
+        .visible
+        .iter()
+        .filter(|label| label.starts_with("overlay-"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let active = labels.first().map(String::as_str);
+    close_session_windows(closer, &labels, active)
+}
 use newpic_platform::geometry::{
     Display, DisplayId, DisplayOrientation, PhysicalRect, ScaleFactor,
 };
@@ -30,9 +60,6 @@ struct RecordingCloser {
 }
 
 impl OverlayWindowCloser for RecordingCloser {
-    fn labels(&self) -> Vec<String> {
-        self.visible.clone()
-    }
     fn hide(&mut self, label: &str) -> Result<(), OverlayError> {
         self.events.push(format!("hide:{label}"));
         if self.fail_hide.as_deref() == Some(label) {
@@ -102,6 +129,72 @@ fn close_waits_for_verified_removal_and_reports_failures() {
         Err(OverlayError::CloseTimeout(_))
     ));
     assert_eq!(timeout.waits, 100);
+}
+
+#[test]
+fn hide_failure_restores_hidden_windows_then_focuses_only_active_once() {
+    let labels = vec![
+        "overlay-7-0".into(),
+        "overlay-7-1".into(),
+        "overlay-7-2".into(),
+    ];
+    for failing in &labels {
+        let mut closer = RecordingCloser {
+            visible: labels.clone(),
+            fail_hide: Some(failing.clone()),
+            ..Default::default()
+        };
+        assert!(close_session_windows(&mut closer, &labels, Some("overlay-7-1")).is_err());
+        let focuses = closer
+            .events
+            .iter()
+            .filter(|event| event.starts_with("refocus:"))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(focuses, ["refocus:overlay-7-1"]);
+        let focus_index = closer
+            .events
+            .iter()
+            .position(|event| event == "refocus:overlay-7-1")
+            .unwrap();
+        assert!(!closer.events[focus_index + 1..]
+            .iter()
+            .any(|event| event.starts_with("show:")));
+        assert!(!closer
+            .events
+            .iter()
+            .any(|event| event == "refocus:overlay-7-0" || event == "refocus:overlay-7-2"));
+    }
+}
+
+#[test]
+fn session_unique_labels_do_not_collide_after_best_effort_close_failure() {
+    let displays = vec![display("main", 0, 1920, true)];
+    let request = request(
+        CaptureAction::FixedRegion,
+        Some(PhysicalRectDto {
+            x: 100,
+            y: 100,
+            width: 800,
+            height: 600,
+        }),
+    );
+    let mut first = RecordingFactory::default();
+    create_session_windows(41, &request, &displays, &mut first).unwrap();
+    let mut second = RecordingFactory::default();
+    create_session_windows(42, &request, &displays, &mut second).unwrap();
+    assert!(first
+        .events
+        .iter()
+        .any(|event| event == "build:overlay-41-0"));
+    assert!(second
+        .events
+        .iter()
+        .any(|event| event == "build:overlay-42-0"));
+    assert!(first
+        .events
+        .iter()
+        .all(|event| !event.contains("overlay-42-")));
 }
 
 fn request(action: CaptureAction, initial_rect: Option<PhysicalRectDto>) -> SelectionRequest {
@@ -270,7 +363,11 @@ fn all_windows_build_before_exactly_one_active_f9_focus() {
 
     assert_eq!(
         factory.events,
-        ["build:overlay-0", "build:overlay-1", "focus:overlay-0"]
+        [
+            "build:overlay-1-0",
+            "build:overlay-1-1",
+            "focus:overlay-1-0"
+        ]
     );
 }
 
@@ -292,16 +389,16 @@ fn first_middle_and_focus_failures_cleanup_every_built_overlay() {
 
     for (failure, expected) in [
         (
-            Some("overlay-0"),
-            vec!["build:overlay-0", "cleanup:overlay-0"],
+            Some("overlay-1-0"),
+            vec!["build:overlay-1-0", "cleanup:overlay-1-0"],
         ),
         (
-            Some("overlay-1"),
+            Some("overlay-1-1"),
             vec![
-                "build:overlay-0",
-                "build:overlay-1",
-                "cleanup:overlay-1",
-                "cleanup:overlay-0",
+                "build:overlay-1-0",
+                "build:overlay-1-1",
+                "cleanup:overlay-1-1",
+                "cleanup:overlay-1-0",
             ],
         ),
     ] {
@@ -321,11 +418,11 @@ fn first_middle_and_focus_failures_cleanup_every_built_overlay() {
     assert_eq!(
         factory.events,
         [
-            "build:overlay-0",
-            "build:overlay-1",
-            "focus:overlay-0",
-            "cleanup:overlay-1",
-            "cleanup:overlay-0"
+            "build:overlay-1-0",
+            "build:overlay-1-1",
+            "focus:overlay-1-0",
+            "cleanup:overlay-1-1",
+            "cleanup:overlay-1-0"
         ]
     );
 }
@@ -354,6 +451,6 @@ fn startup_failure_attempts_every_cleanup_and_aggregates_cleanup_errors() {
         create_overlay_windows(&request, &displays, &mut factory),
         Err(OverlayError::CleanupFailures { .. })
     ));
-    assert!(factory.events.contains(&"cleanup:overlay-0".into()));
-    assert!(factory.events.contains(&"cleanup:overlay-1".into()));
+    assert!(factory.events.contains(&"cleanup:overlay-1-0".into()));
+    assert!(factory.events.contains(&"cleanup:overlay-1-1".into()));
 }
