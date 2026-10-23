@@ -119,6 +119,27 @@ impl OverlayCoordinator {
         Some(overlay_label(session, index))
     }
 
+    pub fn validate_caller(
+        &self,
+        label: &str,
+        require_active_f9: bool,
+    ) -> Result<(), OverlayError> {
+        let (session_id, index) = parse_overlay_label(label)?;
+        if self.active_session_id != Some(session_id) || index >= self.active_displays.len() {
+            return Err(OverlayError::InvalidWindowLabel(label.to_owned()));
+        }
+        if require_active_f9
+            && self
+                .active_request
+                .as_ref()
+                .is_some_and(|request| request.mode == SelectionMode::FixedSize)
+            && self.active_overlay_label().as_deref() != Some(label)
+        {
+            return Err(OverlayError::InvalidWindowLabel(label.to_owned()));
+        }
+        Ok(())
+    }
+
     pub fn cancel(&mut self) {
         self.active_request = None;
         self.active_displays.clear();
@@ -187,19 +208,30 @@ fn display_contains(display: &Display, rect: PhysicalRect) -> bool {
 }
 
 fn display_index_from_label(label: &str, session_id: u64) -> Result<usize, OverlayError> {
-    let suffix = label
-        .strip_prefix(&format!("{OVERLAY_WINDOW_PREFIX}{session_id}-"))
-        .ok_or_else(|| OverlayError::InvalidWindowLabel(label.to_owned()))?;
-    if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(OverlayError::InvalidWindowLabel(label.to_owned()));
-    }
-    let index: usize = suffix
-        .parse()
-        .map_err(|_| OverlayError::InvalidWindowLabel(label.to_owned()))?;
-    if label != overlay_label(session_id, index) {
+    let (parsed_session, index) = parse_overlay_label(label)?;
+    if parsed_session != session_id {
         return Err(OverlayError::InvalidWindowLabel(label.to_owned()));
     }
     Ok(index)
+}
+
+fn parse_overlay_label(label: &str) -> Result<(u64, usize), OverlayError> {
+    let suffix = label
+        .strip_prefix(OVERLAY_WINDOW_PREFIX)
+        .ok_or_else(|| OverlayError::InvalidWindowLabel(label.to_owned()))?;
+    let (session, index) = suffix
+        .split_once('-')
+        .ok_or_else(|| OverlayError::InvalidWindowLabel(label.to_owned()))?;
+    let session_id: u64 = session
+        .parse()
+        .map_err(|_| OverlayError::InvalidWindowLabel(label.to_owned()))?;
+    let index: usize = index
+        .parse()
+        .map_err(|_| OverlayError::InvalidWindowLabel(label.to_owned()))?;
+    if label != overlay_label(session_id, index) || session_id == 0 {
+        return Err(OverlayError::InvalidWindowLabel(label.to_owned()));
+    }
+    Ok((session_id, index))
 }
 
 fn active_fixed_display_index(

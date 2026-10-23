@@ -608,3 +608,45 @@ fn mirrored_f9_persists_the_explicitly_selected_display() {
         second.id()
     );
 }
+
+#[test]
+fn stale_and_inactive_overlay_callers_cannot_mutate_current_session() {
+    let displays = vec![
+        test_display("left", -1280, 0, 1280, 1024, 1.0, false),
+        test_display("main", 0, 0, 1920, 1080, 1.0, true),
+    ];
+    let rect = PhysicalRect::new(100, 100, 700, 500).unwrap();
+    let mut coordinator = OverlayCoordinator::new();
+    let first = coordinator
+        .start_selection_with_displays(
+            request(CaptureAction::FixedRegion, Some(rect)),
+            displays.clone(),
+        )
+        .unwrap();
+    let old_active = format!("overlay-{first}-1");
+    coordinator.cancel();
+    let second = coordinator
+        .start_selection_with_displays(request(CaptureAction::FixedRegion, Some(rect)), displays)
+        .unwrap();
+    let current_active = format!("overlay-{second}-1");
+    let inactive = format!("overlay-{second}-0");
+
+    assert!(coordinator.validate_caller(&old_active, true).is_err());
+    assert!(coordinator.validate_caller(&old_active, false).is_err());
+    assert!(coordinator.validate_caller(&inactive, true).is_err());
+    assert!(coordinator.is_active());
+    coordinator.validate_caller(&current_active, true).unwrap();
+    coordinator.complete(rect).unwrap();
+    assert!(!coordinator.is_active());
+
+    let third = coordinator
+        .start_selection_with_displays(
+            request(CaptureAction::FixedRegion, Some(rect)),
+            vec![test_display("main", 0, 0, 1920, 1080, 1.0, true)],
+        )
+        .unwrap();
+    let current_cancel = format!("overlay-{third}-0");
+    coordinator.validate_caller(&current_cancel, false).unwrap();
+    coordinator.cancel();
+    assert!(!coordinator.is_active());
+}

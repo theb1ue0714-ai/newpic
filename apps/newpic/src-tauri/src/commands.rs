@@ -188,6 +188,7 @@ pub fn with_capture_reservation<T>(
 #[tauri::command]
 pub fn complete_selection<R: Runtime>(
     app: AppHandle<R>,
+    window: WebviewWindow<R>,
     state: State<'_, AppState>,
     rect: PhysicalRectDto,
 ) -> Result<(), CommandError> {
@@ -198,12 +199,14 @@ pub fn complete_selection<R: Runtime>(
             .map_err(|error| CommandError::new(format!("could not query displays: {error}")))?;
         let mut settings_transaction = state.settings_transaction();
         let current_settings = settings_transaction.clone();
-        let overlay_guard = lock(&state.overlay);
+        let mut overlay_guard = lock(&state.overlay);
+        overlay_guard
+            .validate_caller(window.label(), true)
+            .map_err(CommandError::new)?;
         let overlay_labels = overlay_guard.overlay_labels();
         let active_label = overlay_guard.active_overlay_label();
-        drop(overlay_guard);
         complete_selection_with_effects(
-            &mut lock(&state.overlay),
+            &mut overlay_guard,
             &current_settings,
             &state.repository,
             &displays,
@@ -254,9 +257,13 @@ fn dispatch_region_capture<R: Runtime>(
 #[tauri::command]
 pub fn cancel_selection<R: Runtime>(
     app: AppHandle<R>,
+    window: WebviewWindow<R>,
     state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
     let mut coordinator = lock(&state.overlay);
+    coordinator
+        .validate_caller(window.label(), false)
+        .map_err(CommandError::new)?;
     let labels = coordinator.overlay_labels();
     let active_label = coordinator.active_overlay_label();
     let closed =
