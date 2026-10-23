@@ -402,4 +402,12 @@ describe('selection reducer and coordinate helpers', () => {
       )
     ).toEqual(nonDivisiblePhysical);
   });
+  it.each([1.25, 1.5, 1.75])('rounds physical edges consistently at scale %s', (scaleFactor) => {
+    const display = { x: -2560, y: -900, width: 3200, height: 1800, scaleFactor };
+    const logical = { x: 10.4, y: 20.4, width: 100.4, height: 50.4 };
+    const physical = logicalToPhysical(logical, display);
+    expect(physical.width).toBe(Math.round((logical.x + logical.width) * scaleFactor) - Math.round(logical.x * scaleFactor));
+    expect(physical.height).toBe(Math.round((logical.y + logical.height) * scaleFactor) - Math.round(logical.y * scaleFactor));
+    expect(logicalToPhysical(physicalToLogical(physical, display), display)).toEqual(physical);
+  });
 });

@@ -488,11 +488,15 @@ export function selectionReducer(
 /** Converts display-local logical geometry to global physical geometry. */
 export function logicalToPhysical(rect: Rect, displayBounds: DisplayBounds): Rect {
   const scaleFactor = displayBounds.scaleFactor || 1;
+  const left = Math.round(rect.x * scaleFactor);
+  const top = Math.round(rect.y * scaleFactor);
+  const right = Math.round((rect.x + rect.width) * scaleFactor);
+  const bottom = Math.round((rect.y + rect.height) * scaleFactor);
   return {
-    x: displayBounds.x + Math.round(rect.x * scaleFactor),
-    y: displayBounds.y + Math.round(rect.y * scaleFactor),
-    width: Math.max(1, Math.round(rect.width * scaleFactor)),
-    height: Math.max(1, Math.round(rect.height * scaleFactor)),
+    x: displayBounds.x + left,
+    y: displayBounds.y + top,
+    width: Math.max(1, right - left),
+    height: Math.max(1, bottom - top),
   };
 }
 

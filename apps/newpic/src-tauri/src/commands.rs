@@ -185,6 +185,21 @@ pub fn with_capture_reservation<T>(
     operation(reservation)
 }
 
+pub fn cancel_selection_with_close(
+    coordinator: &mut overlay::OverlayCoordinator,
+    caller_label: &str,
+    close: impl FnOnce(&[String], Option<&str>) -> Result<(), CommandError>,
+) -> Result<(), CommandError> {
+    coordinator
+        .validate_caller(caller_label, false)
+        .map_err(CommandError::new)?;
+    let labels = coordinator.overlay_labels();
+    let active_label = coordinator.active_overlay_label();
+    close(&labels, active_label.as_deref())?;
+    coordinator.cancel();
+    Ok(())
+}
+
 #[tauri::command]
 pub fn complete_selection<R: Runtime>(
     app: AppHandle<R>,
@@ -261,16 +276,11 @@ pub fn cancel_selection<R: Runtime>(
     state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
     let mut coordinator = lock(&state.overlay);
-    coordinator
-        .validate_caller(window.label(), false)
-        .map_err(CommandError::new)?;
-    let labels = coordinator.overlay_labels();
-    let active_label = coordinator.active_overlay_label();
-    let closed =
-        overlay::close_overlays(&app, &labels, active_label.as_deref()).map_err(CommandError::new);
-    coordinator.cancel();
+    cancel_selection_with_close(&mut coordinator, window.label(), |labels, active_label| {
+        overlay::close_overlays(&app, labels, active_label).map_err(CommandError::new)
+    })?;
     state.record(EventLevel::Info, "selection cancelled");
-    closed
+    Ok(())
 }
 
 #[tauri::command]

@@ -5,9 +5,9 @@ use newpic_platform::capture::{
     CaptureError, CaptureFallback, CaptureProvenance, CaptureScaleMetadata, CapturedImage,
 };
 use newpic_platform::geometry::{
-    fixed_region_at, intersections_with_displays, Display, DisplayId, DisplayOrientation,
-    LogicalPoint, PhysicalPoint, PhysicalRect, PhysicalSize, SavedFixedRegion, SavedRegion,
-    SavedRegionDecision, SavedRegionInvalidation, ScaleFactor,
+    intersections_with_displays, Display, DisplayId, DisplayOrientation, LogicalPoint,
+    PhysicalPoint, PhysicalRect, PhysicalSize, SavedFixedRegion, SavedRegion, SavedRegionDecision,
+    SavedRegionInvalidation, ScaleFactor,
 };
 
 fn display(id: &str, x: i32, y: i32, width: u32, height: u32, scale: f64) -> Display {
@@ -363,37 +363,6 @@ fn logical_coordinates_use_each_displays_scale_and_physical_origin() {
     assert_eq!(
         hidpi.logical_to_physical(LogicalPoint::new(100.0, 40.0)),
         Ok(PhysicalPoint::new(150, 60))
-    );
-}
-
-#[test]
-fn fixed_800_by_600_region_clamps_to_a_smaller_display() {
-    let small = display("small", -640, 50, 640, 480, 1.0);
-
-    let region = fixed_region_at(
-        PhysicalPoint::new(-400, 250),
-        PhysicalSize::new(800, 600).expect("valid requested size"),
-        &small,
-    )
-    .expect("fixed selection");
-
-    assert_eq!(
-        region,
-        PhysicalRect::new(-640, 50, 640, 480).expect("expected bounds")
-    );
-}
-
-#[test]
-fn fixed_region_position_is_clamped_inside_the_selected_display() {
-    let primary = display("primary", 100, -300, 1920, 1080, 1.0);
-    let requested = PhysicalSize::new(800, 600).unwrap();
-
-    let near_bottom_right = fixed_region_at(PhysicalPoint::new(1950, 700), requested, &primary)
-        .expect("fixed selection");
-
-    assert_eq!(
-        near_bottom_right,
-        PhysicalRect::new(1220, 180, 800, 600).unwrap()
     );
 }
 

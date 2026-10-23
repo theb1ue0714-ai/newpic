@@ -839,29 +839,6 @@ pub fn intersections_with_displays(
 
 /// Builds an F9 rectangle centered at `pointer`, reduced and repositioned so
 /// it is wholly contained by the selected display.
-pub fn fixed_region_at(
-    pointer: PhysicalPoint,
-    requested: PhysicalSize,
-    display: &Display,
-) -> Result<PhysicalRect, GeometryError> {
-    let bounds = display.bounds;
-    let width = requested.width().min(bounds.size.width());
-    let height = requested.height().min(bounds.size.height());
-    let centered_x = i64::from(pointer.x) - i64::from(width) / 2;
-    let centered_y = i64::from(pointer.y) - i64::from(height) / 2;
-    let max_x = bounds.right() - i64::from(width);
-    let max_y = bounds.bottom() - i64::from(height);
-    let x = centered_x.clamp(bounds.left(), max_x);
-    let y = centered_y.clamp(bounds.top(), max_y);
-
-    PhysicalRect::new(
-        i32::try_from(x).map_err(|_| GeometryError::CoordinateOutOfRange)?,
-        i32::try_from(y).map_err(|_| GeometryError::CoordinateOutOfRange)?,
-        width,
-        height,
-    )
-}
-
 #[derive(Debug, Clone, PartialEq, Error)]
 pub enum GeometryError {
     #[error("physical size must be non-zero, got {width} by {height}")]

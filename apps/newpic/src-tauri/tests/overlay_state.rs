@@ -11,8 +11,9 @@ use newpic_desktop_lib::app_state::{
     plan_capture, AppPaths, AppState, CaptureGate, CapturePlan, SelectionMode, SelectionRequest,
 };
 use newpic_desktop_lib::commands::{
-    apply_default_preset_service, complete_selection_with_effects, merge_read_only_saved_geometry,
-    persist_settings_and_replace, prepare_settings_for_save, with_capture_reservation,
+    apply_default_preset_service, cancel_selection_with_close, complete_selection_with_effects,
+    merge_read_only_saved_geometry, persist_settings_and_replace, prepare_settings_for_save,
+    with_capture_reservation,
 };
 use newpic_desktop_lib::hotkeys::CaptureAction;
 use newpic_desktop_lib::overlay::{
@@ -607,6 +608,28 @@ fn mirrored_f9_persists_the_explicitly_selected_display() {
         committed.settings.saved_fixed_region.unwrap().display_id(),
         second.id()
     );
+}
+
+#[test]
+fn failed_escape_close_keeps_session_for_successful_retry() {
+    let displays = vec![test_display("main", 0, 0, 1920, 1080, 1.0, true)];
+    let rect = PhysicalRect::new(100, 100, 700, 500).unwrap();
+    let mut coordinator = OverlayCoordinator::new();
+    let session = coordinator
+        .start_selection_with_displays(request(CaptureAction::FixedRegion, Some(rect)), displays)
+        .unwrap();
+    let label = format!("overlay-{session}-0");
+    assert!(
+        cancel_selection_with_close(&mut coordinator, &label, |_, _| {
+            Err(newpic_desktop_lib::commands::CommandError {
+                message: "hide failed".into(),
+            })
+        })
+        .is_err()
+    );
+    assert!(coordinator.is_active());
+    cancel_selection_with_close(&mut coordinator, &label, |_, _| Ok(())).unwrap();
+    assert!(!coordinator.is_active());
 }
 
 #[test]

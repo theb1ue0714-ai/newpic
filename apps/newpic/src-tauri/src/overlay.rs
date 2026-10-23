@@ -1,9 +1,7 @@
 use std::time::Duration;
 use tauri::{AppHandle, Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
 
-use newpic_platform::geometry::{
-    Display, GeometryError, PhysicalPoint, PhysicalRect, PhysicalSize,
-};
+use newpic_platform::geometry::{Display, GeometryError, PhysicalRect};
 
 use crate::app_state::AppState;
 pub use crate::app_state::{CaptureAction, PhysicalRectDto, SelectionMode, SelectionRequest};
@@ -162,14 +160,6 @@ impl OverlayCoordinator {
 
     pub const fn last_region(&self) -> Option<PhysicalRect> {
         self.last_region
-    }
-
-    pub fn clamp_fixed_region(
-        pointer: PhysicalPoint,
-        requested: PhysicalSize,
-        display: &Display,
-    ) -> Result<PhysicalRect, GeometryError> {
-        newpic_platform::geometry::fixed_region_at(pointer, requested, display)
     }
 
     pub fn validate_repeat_region(&self, displays: &[Display]) -> Option<PhysicalRect> {
