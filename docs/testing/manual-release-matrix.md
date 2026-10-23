@@ -15,7 +15,16 @@ Record the artifact SHA-256, tester, date, operating-system version, desktop ses
 - [ ] Upgrade from the previous supported version preserves settings and captures.
 - [ ] F7 selects and captures a region; Escape cancels without changing the last region.
 - [ ] F8 repeats the last valid region and falls back to selection when invalid.
-- [ ] F9 shows 800×600 by default and clamps visibly at display edges.
+- [ ] On first use, F9 shows an 800×600 rectangle centered on the primary display; 800×600 is only the initial default, not a permanently fixed size.
+- [ ] Dragging inside the F9 rectangle moves it while preserving the pointer offset; pointer movement without a drag leaves it unchanged.
+- [ ] F9 resizes correctly from all eight directions: north, northeast, east, southeast, south, southwest, west, and northwest; every direction clamps visibly at the selected display edge and never reaches zero size.
+- [ ] Ordinary clicks and pointer-up do not capture F9; Enter alone captures and saves the displayed position and size.
+- [ ] Repeating F9 restores the last Enter-confirmed position and size, including after NewPic exits and restarts.
+- [ ] Escape cancels F9 without writing a file or replacing the previously saved position and size.
+- [ ] A saved F9 rectangle on a display with a negative left or upper origin restores to the exact physical coordinates when the display topology is unchanged.
+- [ ] Removing the saved display moves F9 inside the current primary display, preserving its saved size when it fits and reducing it only when required.
+- [ ] Changing the saved display's scale, resolution, or orientation safely revalidates F9 on the current primary display and shows the actual dimensions before Enter.
+- [ ] F8 and F9 histories remain separate: completing F9 does not replace the F8 last region, and completing F7/F8 does not replace the saved F9 rectangle.
 - [ ] F10 captures the active-window content or clearly reports the documented fallback.
 - [ ] Saved PNG pixels and clipboard pixels are identical.
 - [ ] Sequence names do not overwrite existing files and begin with `001.png` on an empty destination.

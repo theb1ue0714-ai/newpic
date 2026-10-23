@@ -77,8 +77,14 @@ describe("NewPic settings", () => {
     expect(screen.getByRole("checkbox", { name: "업데이트 자동 확인" })).not.toBeChecked();
     await user.click(screen.getByRole("button", { name: "캡처" }));
     expect(screen.getByRole("checkbox", { name: "포인터 포함" })).not.toBeChecked();
-    expect(screen.getByLabelText("고정 영역 너비")).toHaveValue(800);
-    expect(screen.getByLabelText("고정 영역 높이")).toHaveValue(600);
+    expect(screen.getByText("F9 저장 영역 크기")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "첫 사용은 800×600으로 시작합니다. Enter로 캡처하면 위치와 크기가 저장되며, 이 값은 저장된 크기를 변경합니다.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("F9 저장 영역 너비")).toHaveValue(800);
+    expect(screen.getByLabelText("F9 저장 영역 높이")).toHaveValue(600);
     await user.click(screen.getByRole("button", { name: "저장" }));
     expect(screen.getByRole("checkbox", { name: "파일 자동 저장" })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: "클립보드에 복사" })).toBeChecked();
@@ -87,7 +93,7 @@ describe("NewPic settings", () => {
     await user.click(screen.getByRole("button", { name: "단축키" }));
     expect(screen.getByLabelText("영역 캡처 단축키")).toHaveValue("F7");
     expect(screen.getByLabelText("마지막 영역 다시 캡처 단축키")).toHaveValue("F8");
-    expect(screen.getByLabelText("고정 크기 캡처 단축키")).toHaveValue("F9");
+    expect(screen.getByLabelText("저장 영역 이동 캡처 단축키")).toHaveValue("F9");
     expect(screen.getByLabelText("활성 창 캡처 단축키")).toHaveValue("F10");
   });
 

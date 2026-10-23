@@ -544,7 +544,7 @@ Register official global-shortcut 2.4.1, autostart 2.7.0, and notification 2.7.0
 
 **Step 3: Implement tray and commands**
 
-Tray entries: 영역 캡처, 마지막 영역 다시 캡처, 고정 크기 캡처, 활성 창 캡처, 설정, NewPic 종료.
+Tray entries: 영역 캡처, 마지막 영역 다시 캡처, 저장 영역 이동 캡처, 활성 창 캡처, 설정, NewPic 종료.
 
 Expose typed commands for reading/saving settings, triggering captures, querying diagnostics, applying the default preset, choosing the save folder, and opening the OS permission settings where supported.
 
@@ -561,7 +561,7 @@ git commit -m "feat: wire NewPic tray shortcuts and startup"
 
 ---
 
-### Task 10: Build region and fixed-size selection overlays
+### Task 10: Build region and reusable F9 selection overlays
 
 **Files:**
 - Create: `apps/newpic/overlay.html`
@@ -577,7 +577,7 @@ git commit -m "feat: wire NewPic tray shortcuts and startup"
 
 **Step 1: Write failing reducer tests**
 
-Pure selection tests cover pointer down/move/up, reverse-direction drags, escape cancellation, minimum 1×1 selection, fixed 800×600 movement, edge clamping, physical/logical coordinate conversion, and F8 last-region preservation after cancellation.
+Pure selection tests cover F7 pointer down/move/up, reverse-direction drags, and Escape cancellation without changing the F8 last-region slot. F9 tests cover first-use 800×600 centering, initialization from a saved rectangle, pointer movement without an active drag, movement with the original pointer offset, all four edge and four corner resize handles, minimum 1×1 size, display-edge clamping, keyboard movement and resizing, pointer-up without completion, Enter-only confirmation, Escape preservation, inactive/loading overlays, and physical/logical coordinate conversion with negative display origins. Coordinator tests cover atomic F9 persistence, restart restoration, display-topology fallback, stale-session rejection, and F8/F9 state separation.
 
 **Step 2: Run failures**
 
@@ -590,7 +590,9 @@ Expected: FAIL because the selection state and Rust overlay coordinator are abse
 
 **Step 3: Implement the overlay**
 
-Create one borderless transparent always-on-top overlay per display. The overlay renders a dim layer, clear selected rectangle, dimension label, and no decorative motion. It emits a physical rectangle to Rust and closes every overlay before taking pixels so NewPic never captures itself.
+Create one borderless transparent always-on-top overlay per display. The overlay renders a dim layer, clear selected rectangle, always-visible dimension label, and no decorative motion. F7 keeps its drag-to-select behavior. F9 restores its independently saved position and size, or on first use centers an 800×600 rectangle on the primary display. Dragging inside moves the F9 rectangle; dragging any of eight named edge and corner handles resizes it. Pointer movement, ordinary clicks, and pointer-up never capture F9. Enter confirms F9, closes every overlay before taking pixels so NewPic never captures itself, and atomically persists the confirmed physical position, size, display identity, and scale metadata. Escape closes the overlay without replacing the previously saved F9 rectangle.
+
+Keep F8 and F9 state independent. Resolve a saved F9 rectangle exactly when its display fingerprint still matches. If the saved display is missing or its resolution, orientation, or scale has changed, preserve the saved size where possible and clamp or center it inside the current primary display. Convert display-local logical coordinates to global physical coordinates using both scale and the display physical origin.
 
 Serialize concurrent capture requests: while selection is active, subsequent hotkeys produce one “capture already active” notification instead of another overlay.
 
@@ -599,9 +601,10 @@ Serialize concurrent capture requests: while selection is active, subsequent hot
 ```bash
 npm test --workspace=@newpic/desktop -- --run src/overlay/selection.test.ts
 cargo test -p newpic-desktop --test overlay_state
+cargo test -p newpic-desktop --test overlay_windowing
 npm run typecheck
 git add apps/newpic
-git commit -m "feat: add region and fixed-size capture overlays"
+git commit -m "feat: add region and reusable F9 capture overlays"
 ```
 
 ---
