@@ -135,7 +135,14 @@ pub fn complete_selection_with_effects<R: SettingsRepository>(
         .ok_or_else(|| CommandError::new(OverlayError::NoActiveSelection))?;
     let mut settings = current.clone();
     if request.action == CaptureAction::FixedRegion {
-        let saved = SavedFixedRegion::capture(rect, displays).map_err(CommandError::new)?;
+        let selected_id = request
+            .selected_display_id
+            .as_ref()
+            .ok_or_else(|| CommandError::new("F9 selection has no selected display"))?;
+        let selected_id = newpic_platform::geometry::DisplayId::new(selected_id.clone())
+            .map_err(CommandError::new)?;
+        let saved = SavedFixedRegion::capture_for_display(rect, &selected_id, displays)
+            .map_err(CommandError::new)?;
         settings.fixed_region = Size::new(rect.size().width(), rect.size().height());
         settings.saved_fixed_region = Some(saved);
         repository.save(&settings).map_err(CommandError::new)?;
@@ -198,9 +205,10 @@ pub fn complete_selection<R: Runtime>(
 fn dispatch_region_capture<R: Runtime>(
     app: AppHandle<R>,
     physical_rect: PhysicalRect,
-    _reservation: crate::app_state::CaptureGuard,
+    reservation: crate::app_state::CaptureGuard,
 ) {
     thread::spawn(move || {
+        let _reservation = reservation;
         let state = app.state::<AppState>();
         let notice = match state.capture(CaptureSource::Region(physical_rect)) {
             Ok(image) => {
@@ -424,6 +432,7 @@ pub fn run_action<R: Runtime>(app: &AppHandle<R>, action: CaptureAction) {
                         fixed_size: None,
                         fallback_from: Some(CaptureAction::RepeatRegion),
                         initial_rect: None,
+                        selected_display_id: None,
                     }),
                     displays,
                 )

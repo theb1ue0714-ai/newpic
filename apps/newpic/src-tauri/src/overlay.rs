@@ -29,6 +29,11 @@ pub enum OverlayError {
     DisplayIndexOutOfRange(usize),
     #[error("overlay windows did not close: {0:?}")]
     CloseTimeout(Vec<String>),
+    #[error("{primary}; cleanup failures: {cleanup:?}")]
+    CleanupFailures {
+        primary: String,
+        cleanup: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -165,6 +170,14 @@ fn active_fixed_display_index(
     request: &SelectionRequest,
     displays: &[Display],
 ) -> Result<usize, OverlayError> {
+    if let Some(selected_id) = &request.selected_display_id {
+        return displays
+            .iter()
+            .position(|display| display.id().as_str() == selected_id)
+            .ok_or(OverlayError::Geometry(GeometryError::DisplayNotFound(
+                newpic_platform::geometry::DisplayId::new(selected_id.clone())?,
+            )));
+    }
     let initial = request
         .initial_rect
         .ok_or(OverlayError::NoActiveSelection)
@@ -205,6 +218,25 @@ pub trait OverlayWindowFactory {
     fn cleanup(&mut self, label: &str) -> Result<(), OverlayError>;
 }
 
+fn cleanup_after_failure(
+    factory: &mut impl OverlayWindowFactory,
+    labels: impl IntoIterator<Item = String>,
+    primary: OverlayError,
+) -> OverlayError {
+    let cleanup: Vec<_> = labels
+        .into_iter()
+        .filter_map(|label| factory.cleanup(&label).err().map(|error| error.to_string()))
+        .collect();
+    if cleanup.is_empty() {
+        primary
+    } else {
+        OverlayError::CleanupFailures {
+            primary: primary.to_string(),
+            cleanup,
+        }
+    }
+}
+
 pub fn create_overlay_windows(
     request: &SelectionRequest,
     displays: &[Display],
@@ -214,11 +246,8 @@ pub fn create_overlay_windows(
     for (index, display) in displays.iter().enumerate() {
         let label = format!("{OVERLAY_WINDOW_PREFIX}{index}");
         if let Err(error) = factory.build(&label, display) {
-            let _ = factory.cleanup(&label);
-            for built_label in built.iter().rev() {
-                let _ = factory.cleanup(built_label);
-            }
-            return Err(error);
+            let labels = std::iter::once(label).chain(built.into_iter().rev());
+            return Err(cleanup_after_failure(factory, labels, error));
         }
         built.push(label);
     }
@@ -227,17 +256,19 @@ pub fn create_overlay_windows(
         let active = match active_fixed_display_index(request, displays) {
             Ok(active) => active,
             Err(error) => {
-                for label in built.iter().rev() {
-                    let _ = factory.cleanup(label);
-                }
-                return Err(error);
+                return Err(cleanup_after_failure(
+                    factory,
+                    built.into_iter().rev(),
+                    error,
+                ));
             }
         };
         if let Err(error) = factory.focus(&format!("{OVERLAY_WINDOW_PREFIX}{active}")) {
-            for label in built.iter().rev() {
-                let _ = factory.cleanup(label);
-            }
-            return Err(error);
+            return Err(cleanup_after_failure(
+                factory,
+                built.into_iter().rev(),
+                error,
+            ));
         }
     }
     Ok(())
@@ -319,8 +350,11 @@ pub fn open_overlays<R: Runtime>(
 
 pub trait OverlayWindowCloser {
     fn labels(&self) -> Vec<String>;
-    fn close(&mut self, label: &str) -> Result<(), OverlayError>;
-    fn is_open(&self, label: &str) -> bool;
+    fn hide(&mut self, label: &str) -> Result<(), OverlayError>;
+    fn show(&mut self, label: &str) -> Result<(), OverlayError>;
+    fn focus(&mut self, label: &str) -> Result<(), OverlayError>;
+    fn is_visible(&self, label: &str) -> bool;
+    fn close_best_effort(&mut self, label: &str);
     fn wait_for_state_change(&mut self);
 }
 
@@ -330,26 +364,67 @@ pub fn close_overlay_windows(closer: &mut impl OverlayWindowCloser) -> Result<()
         .into_iter()
         .filter(|label| label.starts_with(OVERLAY_WINDOW_PREFIX))
         .collect();
+    let mut hidden: Vec<String> = Vec::new();
     for label in &labels {
-        closer.close(label)?;
+        if let Err(error) = closer.hide(label) {
+            let mut restore_errors = Vec::new();
+            for hidden_label in &hidden {
+                if let Err(restore) = closer.show(hidden_label) {
+                    restore_errors.push(restore.to_string());
+                }
+                if let Err(restore) = closer.focus(hidden_label) {
+                    restore_errors.push(restore.to_string());
+                }
+            }
+            return Err(if restore_errors.is_empty() {
+                error
+            } else {
+                OverlayError::CleanupFailures {
+                    primary: error.to_string(),
+                    cleanup: restore_errors,
+                }
+            });
+        }
+        hidden.push(label.clone());
     }
     for _ in 0..100 {
-        let open: Vec<_> = labels
+        let visible: Vec<_> = labels
             .iter()
-            .filter(|label| closer.is_open(label))
+            .filter(|label| closer.is_visible(label))
             .cloned()
             .collect();
-        if open.is_empty() {
+        if visible.is_empty() {
+            for label in &labels {
+                closer.close_best_effort(label);
+            }
             return Ok(());
         }
         closer.wait_for_state_change();
     }
-    Err(OverlayError::CloseTimeout(
+    let primary = OverlayError::CloseTimeout(
         labels
-            .into_iter()
-            .filter(|label| closer.is_open(label))
+            .iter()
+            .filter(|label| closer.is_visible(label))
+            .cloned()
             .collect(),
-    ))
+    );
+    let mut restore_errors = Vec::new();
+    for label in &labels {
+        if let Err(error) = closer.show(label) {
+            restore_errors.push(error.to_string());
+        }
+        if let Err(error) = closer.focus(label) {
+            restore_errors.push(error.to_string());
+        }
+    }
+    Err(if restore_errors.is_empty() {
+        primary
+    } else {
+        OverlayError::CleanupFailures {
+            primary: primary.to_string(),
+            cleanup: restore_errors,
+        }
+    })
 }
 
 struct TauriOverlayWindowCloser<'a, R: Runtime> {
@@ -361,25 +436,44 @@ impl<R: Runtime> OverlayWindowCloser for TauriOverlayWindowCloser<'_, R> {
         self.app.webview_windows().into_keys().collect()
     }
 
-    fn close(&mut self, label: &str) -> Result<(), OverlayError> {
+    fn hide(&mut self, label: &str) -> Result<(), OverlayError> {
         match self.app.get_webview_window(label) {
-            Some(window) => {
-                window
-                    .hide()
-                    .map_err(|error| OverlayError::Window(error.to_string()))?;
-                window
-                    .close()
-                    .map_err(|error| OverlayError::Window(error.to_string()))
-            }
+            Some(window) => window
+                .hide()
+                .map_err(|error| OverlayError::Window(error.to_string())),
             None => Ok(()),
         }
     }
 
-    fn is_open(&self, label: &str) -> bool {
+    fn show(&mut self, label: &str) -> Result<(), OverlayError> {
+        match self.app.get_webview_window(label) {
+            Some(window) => window
+                .show()
+                .map_err(|error| OverlayError::Window(error.to_string())),
+            None => Ok(()),
+        }
+    }
+
+    fn focus(&mut self, label: &str) -> Result<(), OverlayError> {
+        match self.app.get_webview_window(label) {
+            Some(window) => window
+                .set_focus()
+                .map_err(|error| OverlayError::Window(error.to_string())),
+            None => Ok(()),
+        }
+    }
+
+    fn is_visible(&self, label: &str) -> bool {
         self.app
             .get_webview_window(label)
             .and_then(|window| window.is_visible().ok())
             .unwrap_or(false)
+    }
+
+    fn close_best_effort(&mut self, label: &str) {
+        if let Some(window) = self.app.get_webview_window(label) {
+            let _ = window.close();
+        }
     }
 
     fn wait_for_state_change(&mut self) {

@@ -261,6 +261,17 @@ fn saved_fixed_region_results_remain_keyed_to_selected_display_with_a_new_mirror
 }
 
 #[test]
+fn saved_fixed_region_capture_for_display_disambiguates_mirrors() {
+    let first = display("first", 0, 0, 1000, 800, 1.0);
+    let second = display("second", 0, 0, 1000, 800, 1.0);
+    let rect = PhysicalRect::new(100, 100, 700, 500).unwrap();
+    let saved =
+        SavedFixedRegion::capture_for_display(rect, second.id(), &[first, second.clone()]).unwrap();
+    assert_eq!(saved.display_id(), second.id());
+    assert_eq!(saved.rect(), rect);
+}
+
+#[test]
 fn saved_fixed_region_reports_exact_primary_topology_errors() {
     let saved = SavedFixedRegion::capture(
         PhysicalRect::new(-900, 100, 600, 400).unwrap(),

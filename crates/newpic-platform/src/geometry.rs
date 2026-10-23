@@ -335,8 +335,31 @@ impl SavedFixedRegion {
         })
     }
 
+    pub fn capture_for_display(
+        rect: PhysicalRect,
+        display_id: &DisplayId,
+        displays: &[Display],
+    ) -> Result<Self, GeometryError> {
+        ensure_unique_display_ids(displays)?;
+        let display = displays
+            .iter()
+            .find(|display| display.id() == display_id)
+            .ok_or_else(|| GeometryError::DisplayNotFound(display_id.clone()))?;
+        if !rect_is_contained_by(rect, display.bounds()) {
+            return Err(GeometryError::RegionNotContainedBySingleDisplay);
+        }
+        Ok(Self {
+            rect,
+            display: DisplayFingerprint::from(display),
+        })
+    }
+
     pub const fn rect(&self) -> PhysicalRect {
         self.rect
+    }
+
+    pub const fn display_id(&self) -> &DisplayId {
+        &self.display.id
     }
 
     pub fn resolve(&self, current: &[Display]) -> Result<PhysicalRect, GeometryError> {
@@ -351,6 +374,17 @@ impl SavedFixedRegion {
         let primary = unique_primary_display(current)?;
         let rect = centered_rect(self.rect.size(), primary.bounds())?;
         region_on_selected_display(rect, primary)
+    }
+
+    pub fn resolve_display_id(&self, current: &[Display]) -> Result<DisplayId, GeometryError> {
+        ensure_unique_display_ids(current)?;
+        if let Some(display) = current
+            .iter()
+            .find(|display| DisplayFingerprint::from(*display) == self.display)
+        {
+            return Ok(display.id().clone());
+        }
+        Ok(unique_primary_display(current)?.id().clone())
     }
 
     /// Applies a Settings size edit. While the stable display ID remains, the
@@ -859,4 +893,6 @@ pub enum GeometryError {
     PrimaryDisplayUnavailable,
     #[error("current topology contains more than one primary display")]
     MultiplePrimaryDisplays,
+    #[error("display was not found: {0:?}")]
+    DisplayNotFound(DisplayId),
 }

@@ -101,6 +101,8 @@ pub struct SelectionRequest {
     pub fallback_from: Option<CaptureAction>,
     /// Global physical rectangle restored for F9 before windows are opened.
     pub initial_rect: Option<PhysicalRectDto>,
+    #[serde(default)]
+    pub selected_display_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +129,7 @@ pub fn plan_capture(
             fixed_size: None,
             fallback_from: None,
             initial_rect: None,
+            selected_display_id: None,
         }),
         CaptureAction::RepeatRegion => CapturePlan::Select(SelectionRequest {
             action: CaptureAction::Region,
@@ -134,11 +137,22 @@ pub fn plan_capture(
             fixed_size: None,
             fallback_from: Some(CaptureAction::RepeatRegion),
             initial_rect: None,
+            selected_display_id: None,
         }),
         CaptureAction::FixedRegion => {
-            let initial_rect = match &settings.saved_fixed_region {
-                Some(saved) => saved.resolve(displays)?,
-                None => centered_fixed_rect(settings.fixed_region, displays)?,
+            let (initial_rect, selected_display_id) = match &settings.saved_fixed_region {
+                Some(saved) => (
+                    saved.resolve(displays)?,
+                    saved.resolve_display_id(displays)?.as_str().to_owned(),
+                ),
+                None => {
+                    let rect = centered_fixed_rect(settings.fixed_region, displays)?;
+                    let primary = displays
+                        .iter()
+                        .find(|display| display.is_primary())
+                        .ok_or(GeometryError::PrimaryDisplayUnavailable)?;
+                    (rect, primary.id().as_str().to_owned())
+                }
             };
             CapturePlan::Select(SelectionRequest {
                 action,
@@ -146,6 +160,7 @@ pub fn plan_capture(
                 fixed_size: Some(settings.fixed_region),
                 fallback_from: None,
                 initial_rect: Some(initial_rect.into()),
+                selected_display_id: Some(selected_display_id),
             })
         }
     })
@@ -419,6 +434,24 @@ mod tests {
     use newpic_core::storage::{RecoveredImage, StorageError};
 
     use super::*;
+
+    #[test]
+    fn owned_capture_guard_remains_held_for_worker_lifetime() {
+        let gate = CaptureGate::default();
+        let guard = gate.try_reserve().unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _guard = guard;
+            started_tx.send(()).unwrap();
+            finish_rx.recv().unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(gate.try_reserve().is_none());
+        finish_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(gate.try_reserve().is_some());
+    }
 
     #[test]
     fn default_destination_is_downloads_newpic() {

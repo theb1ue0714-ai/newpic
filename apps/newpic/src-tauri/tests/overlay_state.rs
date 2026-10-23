@@ -44,6 +44,8 @@ fn test_display(
 }
 
 fn request(action: CaptureAction, initial_rect: Option<PhysicalRect>) -> SelectionRequest {
+    let selected_display_id =
+        initial_rect.map(|rect| if rect.origin().x < 0 { "left" } else { "main" }.to_owned());
     SelectionRequest {
         action,
         mode: if action == CaptureAction::FixedRegion {
@@ -54,6 +56,7 @@ fn request(action: CaptureAction, initial_rect: Option<PhysicalRect>) -> Selecti
         fixed_size: (action == CaptureAction::FixedRegion).then(|| Size::new(800, 600)),
         fallback_from: None,
         initial_rect: initial_rect.map(PhysicalRectDto::from),
+        selected_display_id,
     }
 }
 
@@ -208,6 +211,7 @@ fn f9_plan_falls_back_inside_primary_when_topology_changes() {
             height: 400,
         })
     );
+    assert_eq!(request.selected_display_id.as_deref(), Some("main"));
 }
 
 #[test]
@@ -561,4 +565,36 @@ fn completion_revalidates_current_topology_after_snapshotted_display_is_removed(
     assert!(result.is_err());
     assert!(coordinator.is_active());
     assert!(repository.saves.borrow().is_empty());
+}
+
+#[test]
+fn mirrored_f9_persists_the_explicitly_selected_display() {
+    let first = test_display("first", 0, 0, 1920, 1080, 1.0, false);
+    let second = test_display("second", 0, 0, 1920, 1080, 1.0, true);
+    let displays = vec![first, second.clone()];
+    let rect = PhysicalRect::new(100, 100, 700, 500).unwrap();
+    let request = SelectionRequest {
+        action: CaptureAction::FixedRegion,
+        mode: SelectionMode::FixedSize,
+        fixed_size: Some(Size::new(700, 500)),
+        fallback_from: None,
+        initial_rect: Some(rect.into()),
+        selected_display_id: Some("second".into()),
+    };
+    let mut coordinator = OverlayCoordinator::new();
+    start_overlay_session(&mut coordinator, request, displays.clone(), |_, _| Ok(())).unwrap();
+    let repository = RecordingRepository::default();
+    let committed = complete_selection_with_effects(
+        &mut coordinator,
+        &Settings::default(),
+        &repository,
+        &displays,
+        rect,
+        (|_| {}, || Ok(()), || {}),
+    )
+    .unwrap();
+    assert_eq!(
+        committed.settings.saved_fixed_region.unwrap().display_id(),
+        second.id()
+    );
 }

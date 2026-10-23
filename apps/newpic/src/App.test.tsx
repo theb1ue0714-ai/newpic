@@ -6,7 +6,7 @@ import { App } from "./App";
 import type { Diagnostics, Settings } from "./api/newpic";
 
 const settings: Settings = {
-  schema_version: 1,
+  schema_version: 2,
   autostart: true,
   run_in_tray: true,
   success_notifications: true,

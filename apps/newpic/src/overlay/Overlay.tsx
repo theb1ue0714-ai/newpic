@@ -20,6 +20,7 @@ interface OverlayInfo {
     mode: 'free_region' | 'fixed_size';
     fixed_size?: { width: number; height: number };
     fallback_from?: string;
+    selected_display_id?: string;
   };
   display_bounds: {
     x: number;

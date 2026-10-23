@@ -21,27 +21,47 @@ fn display(id: &str, x: i32, width: u32, primary: bool) -> Display {
 
 #[derive(Default)]
 struct RecordingCloser {
-    open: Vec<String>,
+    visible: Vec<String>,
+    events: Vec<String>,
+    fail_hide: Option<String>,
     close_error: bool,
-    stays_open: bool,
+    stays_visible: bool,
     waits: usize,
 }
 
 impl OverlayWindowCloser for RecordingCloser {
     fn labels(&self) -> Vec<String> {
-        self.open.clone()
+        self.visible.clone()
     }
-    fn close(&mut self, label: &str) -> Result<(), OverlayError> {
-        if self.close_error {
-            return Err(OverlayError::Window("close failed".into()));
+    fn hide(&mut self, label: &str) -> Result<(), OverlayError> {
+        self.events.push(format!("hide:{label}"));
+        if self.fail_hide.as_deref() == Some(label) {
+            return Err(OverlayError::Window("hide failed".into()));
         }
-        if !self.stays_open {
-            self.open.retain(|item| item != label);
+        if !self.stays_visible {
+            self.visible.retain(|item| item != label);
         }
         Ok(())
     }
-    fn is_open(&self, label: &str) -> bool {
-        self.open.iter().any(|item| item == label)
+    fn show(&mut self, label: &str) -> Result<(), OverlayError> {
+        self.events.push(format!("show:{label}"));
+        if !self.visible.iter().any(|item| item == label) {
+            self.visible.push(label.to_owned());
+        }
+        Ok(())
+    }
+    fn focus(&mut self, label: &str) -> Result<(), OverlayError> {
+        self.events.push(format!("refocus:{label}"));
+        Ok(())
+    }
+    fn is_visible(&self, label: &str) -> bool {
+        self.visible.iter().any(|item| item == label)
+    }
+    fn close_best_effort(&mut self, label: &str) {
+        self.events.push(format!("close:{label}"));
+        if !self.close_error {
+            self.visible.retain(|item| item != label);
+        }
     }
     fn wait_for_state_change(&mut self) {
         self.waits += 1;
@@ -51,25 +71,30 @@ impl OverlayWindowCloser for RecordingCloser {
 #[test]
 fn close_waits_for_verified_removal_and_reports_failures() {
     let mut success = RecordingCloser {
-        open: vec!["overlay-0".into(), "main".into()],
+        visible: vec!["overlay-0".into(), "main".into()],
+        close_error: true,
         ..Default::default()
     };
     close_overlay_windows(&mut success).unwrap();
-    assert_eq!(success.open, ["main"]);
+    assert_eq!(success.visible, ["main"]);
+    assert_eq!(success.events, ["hide:overlay-0", "close:overlay-0"]);
 
     let mut failed = RecordingCloser {
-        open: vec!["overlay-0".into()],
-        close_error: true,
+        visible: vec!["overlay-0".into(), "overlay-1".into()],
+        fail_hide: Some("overlay-1".into()),
         ..Default::default()
     };
     assert!(matches!(
         close_overlay_windows(&mut failed),
         Err(OverlayError::Window(_))
     ));
+    assert_eq!(failed.visible, ["overlay-1", "overlay-0"]);
+    assert!(failed.events.contains(&"show:overlay-0".into()));
+    assert!(failed.events.contains(&"refocus:overlay-0".into()));
 
     let mut timeout = RecordingCloser {
-        open: vec!["overlay-0".into()],
-        stays_open: true,
+        visible: vec!["overlay-0".into()],
+        stays_visible: true,
         ..Default::default()
     };
     assert!(matches!(
@@ -80,6 +105,8 @@ fn close_waits_for_verified_removal_and_reports_failures() {
 }
 
 fn request(action: CaptureAction, initial_rect: Option<PhysicalRectDto>) -> SelectionRequest {
+    let selected_display_id =
+        initial_rect.map(|rect| if rect.x < 0 { "left" } else { "main" }.to_owned());
     SelectionRequest {
         action,
         mode: if action == CaptureAction::FixedRegion {
@@ -90,6 +117,7 @@ fn request(action: CaptureAction, initial_rect: Option<PhysicalRectDto>) -> Sele
         fixed_size: Some(Size::new(800, 600)),
         fallback_from: None,
         initial_rect,
+        selected_display_id,
     }
 }
 
@@ -165,7 +193,7 @@ fn overlapping_displays_still_select_exactly_one_active_f9_window() {
         display("first", 0, 1920, false),
         display("second", 0, 1920, true),
     ];
-    let request = request(
+    let mut request = request(
         CaptureAction::FixedRegion,
         Some(PhysicalRectDto {
             x: 100,
@@ -174,6 +202,7 @@ fn overlapping_displays_still_select_exactly_one_active_f9_window() {
             height: 600,
         }),
     );
+    request.selected_display_id = Some("first".into());
     let active = ["overlay-0", "overlay-1"]
         .into_iter()
         .filter(|label| {
@@ -190,6 +219,7 @@ struct RecordingFactory {
     events: Vec<String>,
     fail_build: Option<String>,
     fail_focus: bool,
+    fail_cleanup: bool,
 }
 
 impl OverlayWindowFactory for RecordingFactory {
@@ -211,7 +241,11 @@ impl OverlayWindowFactory for RecordingFactory {
 
     fn cleanup(&mut self, label: &str) -> Result<(), OverlayError> {
         self.events.push(format!("cleanup:{label}"));
-        Ok(())
+        if self.fail_cleanup {
+            Err(OverlayError::Window(format!("cleanup failed {label}")))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -294,4 +328,32 @@ fn first_middle_and_focus_failures_cleanup_every_built_overlay() {
             "cleanup:overlay-0"
         ]
     );
+}
+
+#[test]
+fn startup_failure_attempts_every_cleanup_and_aggregates_cleanup_errors() {
+    let displays = vec![
+        display("left", -1280, 1280, false),
+        display("main", 0, 1920, true),
+    ];
+    let request = request(
+        CaptureAction::FixedRegion,
+        Some(PhysicalRectDto {
+            x: -1100,
+            y: 100,
+            width: 800,
+            height: 600,
+        }),
+    );
+    let mut factory = RecordingFactory {
+        fail_focus: true,
+        fail_cleanup: true,
+        ..Default::default()
+    };
+    assert!(matches!(
+        create_overlay_windows(&request, &displays, &mut factory),
+        Err(OverlayError::CleanupFailures { .. })
+    ));
+    assert!(factory.events.contains(&"cleanup:overlay-0".into()));
+    assert!(factory.events.contains(&"cleanup:overlay-1".into()));
 }
