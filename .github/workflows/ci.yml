@@ -56,6 +56,10 @@ jobs:
       - run: npm run build --workspace=@newpic/desktop
       - name: Tauri application build check
         run: npm run tauri --workspace=@newpic/desktop -- build --no-bundle --ci
+      - name: Verify Windows GUI subsystem
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/assert-windows-gui-subsystem.ps1 ./target/release/newpic-desktop.exe
       - run: bash scripts/verify-default-preset.sh
         shell: bash
       - name: Audit npm production dependencies

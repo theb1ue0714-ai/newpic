@@ -106,6 +106,7 @@ require_text THIRD_PARTY_NOTICES.md 'Raycast DESIGN.md reference' 'the incorpora
 require_text THIRD_PARTY_NOTICES.md 'Copyright (c) 2026 VoltAgent' 'the upstream copyright notice'
 require_text THIRD_PARTY_NOTICES.md 'Permission is hereby granted, free of charge' 'the MIT permission grant'
 require_text THIRD_PARTY_NOTICES.md 'THE SOFTWARE IS PROVIDED "AS IS"' 'the MIT warranty disclaimer'
+require_text apps/newpic/src-tauri/src/main.rs '#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]' 'the release-only Windows GUI subsystem attribute'
 
 if (( failures > 0 )); then
   printf 'Repository contract failed with %d issue(s).\n' "$failures" >&2
