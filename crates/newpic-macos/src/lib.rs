@@ -495,7 +495,7 @@ mod platform {
         let mut stream = SCStream::new(filter, &config);
         stream
             .add_output_handler(
-                move |sample, kind| {
+                move |sample: screencapturekit::cm::CMSampleBuffer, kind| {
                     if kind != SCStreamOutputType::Screen
                         || !sample.frame_status().is_some_and(|s| s.has_content())
                     {
@@ -684,10 +684,7 @@ mod platform {
         let scale = ScaleFactor::new(display.width() as f64 / display.frame().size.width)?;
         let width = (window.frame().size.width * scale.get()).round() as u32;
         let height = (window.frame().size.height * scale.get()).round() as u32;
-        let filter = SCContentFilter::create()
-            .with_window(window)
-            .build()
-            .map_err(error)?;
+        let filter = SCContentFilter::create().with_window(window).build();
         let (w, h, pixels) = rgba(frame(&filter, width, height, None, cursor)?)?;
         CapturedImage::new(
             w,
