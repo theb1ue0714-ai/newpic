@@ -17,19 +17,27 @@ jobs:
           - name: Linux
             os: ubuntu-24.04
             bundles: deb,appimage
-            artifacts: target/release/bundle/{deb,appimage}/**/*
+            artifacts: |
+              target/release/bundle/deb/**/*
+              target/release/bundle/appimage/**/*
           - name: Windows
             os: windows-2025
             bundles: msi,nsis
-            artifacts: target/release/bundle/{msi,nsis}/**/*
+            artifacts: |
+              target/release/bundle/msi/**/*
+              target/release/bundle/nsis/**/*
           - name: macOS
             os: macos-15
             bundles: app,dmg
-            artifacts: target/release/bundle/{macos,dmg}/**/*
+            artifacts: |
+              target/release/bundle/macos/**/*
+              target/release/bundle/dmg/**/*
           - name: macOS-Intel
             os: macos-15-intel
             bundles: app,dmg
-            artifacts: target/release/bundle/{macos,dmg}/**/*
+            artifacts: |
+              target/release/bundle/macos/**/*
+              target/release/bundle/dmg/**/*
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
