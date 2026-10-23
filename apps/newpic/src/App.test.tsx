@@ -97,6 +97,19 @@ describe("NewPic settings", () => {
     expect(screen.getByLabelText("활성 창 캡처 단축키")).toHaveValue("F10");
   });
 
+  it("never presents F9 as pointer-following, click-to-capture, or fixed-size", async () => {
+    const user = await renderApp();
+    await user.click(screen.getByRole("button", { name: "캡처" }));
+    expect(screen.getByText("F9 저장 영역 크기")).toBeVisible();
+    expect(document.body).not.toHaveTextContent(/포인터를 따라|포인터 이동으로 캡처/);
+    expect(document.body).not.toHaveTextContent(/클릭(?:하면|하여|으로) 캡처/);
+
+    await user.click(screen.getByRole("button", { name: "단축키" }));
+    expect(screen.getByLabelText("저장 영역 이동 캡처 단축키")).toHaveValue("F9");
+    expect(screen.queryByLabelText("고정 크기 캡처 단축키")).not.toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent("고정 크기 캡처");
+  });
+
   it("shows the 001.png filename preview", async () => {
     const user = await renderApp();
     await user.click(screen.getByRole("button", { name: "파일 이름" }));

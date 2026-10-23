@@ -10,7 +10,8 @@ Phase 1 targets a dependable capture workflow:
 
 - configurable F7 region capture
 - configurable F8 repeat-last-region capture
-- configurable F9 fixed-size region capture (800×600 by default)
+- configurable F9 reusable-region capture: 800×600 only on first use, then
+  move or resize the saved position and size and press Enter to capture and persist it
 - configurable F10 active-window capture
 - automatic PNG saving to the current user's `Downloads/NewPic` folder
 - collision-free `%c` sequence names beginning at `001.png`

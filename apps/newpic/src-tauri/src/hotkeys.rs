@@ -33,7 +33,7 @@ impl CaptureAction {
         match self {
             Self::Region => "영역 캡처",
             Self::RepeatRegion => "마지막 영역 다시 캡처",
-            Self::FixedRegion => "고정 크기 캡처",
+            Self::FixedRegion => "저장 영역 이동 캡처",
             Self::ActiveWindow => "활성 창 캡처",
         }
     }

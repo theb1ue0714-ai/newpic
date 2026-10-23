@@ -82,7 +82,7 @@ fn approved_preset_maps_f7_through_f10_to_the_four_capture_actions() {
     );
     assert_eq!(CaptureAction::Region.label(), "영역 캡처");
     assert_eq!(CaptureAction::RepeatRegion.label(), "마지막 영역 다시 캡처");
-    assert_eq!(CaptureAction::FixedRegion.label(), "고정 크기 캡처");
+    assert_eq!(CaptureAction::FixedRegion.label(), "저장 영역 이동 캡처");
     assert_eq!(CaptureAction::ActiveWindow.label(), "활성 창 캡처");
 }
 

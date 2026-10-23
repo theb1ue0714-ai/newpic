@@ -699,7 +699,7 @@ Expected before wiring: FAIL because the verification commands or fixtures are i
 The matrix records:
 
 - clean install and first-launch preset
-- F7/F8/F9/F10
+- F7 selection, F8 repeat, F9 saved-position-and-size move/resize with Enter persistence, and F10 active-window capture
 - file and clipboard pixel equality
 - mixed-DPI multi-monitor and negative origins
 - permission denied then granted
@@ -727,7 +727,7 @@ Expected: all commands exit 0; `git status --short` lists only intentional docum
 
 **Step 5: Perform the Linux smoke test**
 
-Run the Tauri application in an interactive Linux desktop session and attach evidence for region capture, repeat capture, fixed region, active window, PNG output, clipboard paste, tray menu, diagnostics, and autostart. If this server has no interactive display, mark the smoke test pending rather than passing it.
+Run the Tauri application in an interactive Linux desktop session and attach evidence for F7 region capture, F8 repeat capture, F9 move and eight-direction resize, Enter-only persistence across repeated invocations and restart, F8/F9 separation, active-window capture, PNG output, clipboard paste, tray menu, diagnostics, and autostart. Include negative-origin and changed-display/scale fallback evidence where the desktop supports it. If no interactive evidence is recorded, mark the smoke test pending rather than passing it.
 
 **Step 6: Review and commit**
 
