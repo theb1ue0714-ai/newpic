@@ -90,12 +90,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-files
-          find release-artifacts/NewPic-Windows-unsigned-development -type f -name '*.exe' -exec cp '{}' release-files/NewPic-0.1.0-x64-setup.exe \;
-          find release-artifacts/NewPic-Windows-unsigned-development -type f -name '*.msi' -exec cp '{}' release-files/NewPic-0.1.0-x64.msi \;
-          find release-artifacts/NewPic-macOS-unsigned-development -type f -name '*.dmg' -exec cp '{}' release-files/NewPic-0.1.0-Apple-Silicon.dmg \;
-          find release-artifacts/NewPic-macOS-Intel-unsigned-development -type f -name '*.dmg' -exec cp '{}' release-files/NewPic-0.1.0-Intel.dmg \;
-          find release-artifacts/NewPic-Linux-unsigned-development -type f -name '*.AppImage' -exec cp '{}' release-files/NewPic-0.1.0-x86_64.AppImage \;
-          find release-artifacts/NewPic-Linux-unsigned-development -type f -name '*.deb' -exec cp '{}' release-files/NewPic-0.1.0-amd64.deb \;
+          VERSION="${GITHUB_REF_NAME#v}"
+          find release-artifacts/NewPic-Windows-unsigned-development -type f -name '*.exe' -exec cp '{}' "release-files/NewPic-${VERSION}-x64-setup.exe" \;
+          find release-artifacts/NewPic-Windows-unsigned-development -type f -name '*.msi' -exec cp '{}' "release-files/NewPic-${VERSION}-x64.msi" \;
+          find release-artifacts/NewPic-macOS-unsigned-development -type f -name '*.dmg' -exec cp '{}' "release-files/NewPic-${VERSION}-Apple-Silicon.dmg" \;
+          find release-artifacts/NewPic-macOS-Intel-unsigned-development -type f -name '*.dmg' -exec cp '{}' "release-files/NewPic-${VERSION}-Intel.dmg" \;
+          find release-artifacts/NewPic-Linux-unsigned-development -type f -name '*.AppImage' -exec cp '{}' "release-files/NewPic-${VERSION}-x86_64.AppImage" \;
+          find release-artifacts/NewPic-Linux-unsigned-development -type f -name '*.deb' -exec cp '{}' "release-files/NewPic-${VERSION}-amd64.deb" \;
           test "$(find release-files -maxdepth 1 -type f | wc -l)" -eq 6
           sha256sum release-files/* > release-files/SHA256SUMS.txt
       - name: Publish GitHub release assets

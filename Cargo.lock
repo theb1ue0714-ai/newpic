@@ -2674,7 +2674,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "newpic-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fs2",
  "image",
@@ -2687,7 +2687,7 @@ dependencies = [
 
 [[package]]
 name = "newpic-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "gethostname",
@@ -2710,7 +2710,7 @@ dependencies = [
 
 [[package]]
 name = "newpic-linux"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ashpd",
  "futures-lite",
@@ -2722,7 +2722,7 @@ dependencies = [
 
 [[package]]
 name = "newpic-macos"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "newpic-platform",
  "objc2-app-kit",
@@ -2732,7 +2732,7 @@ dependencies = [
 
 [[package]]
 name = "newpic-platform"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arboard",
  "serde",
@@ -2742,7 +2742,7 @@ dependencies = [
 
 [[package]]
 name = "newpic-testing"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "newpic-core",
  "newpic-platform",
@@ -2750,7 +2750,7 @@ dependencies = [
 
 [[package]]
 name = "newpic-windows"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "newpic-platform",
  "windows",

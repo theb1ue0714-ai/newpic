@@ -349,6 +349,8 @@ impl<R: Runtime> OverlayWindowFactory for TauriOverlayWindowFactory<'_, R> {
             .title("NewPic Overlay")
             .transparent(true)
             .decorations(false)
+            .resizable(false)
+            .maximizable(false)
             .always_on_top(true)
             .skip_taskbar(true)
             .position(bounds.left() as f64 / scale, bounds.top() as f64 / scale)
