@@ -4,8 +4,8 @@ use newpic_desktop_lib::hotkeys::CaptureAction;
 use newpic_desktop_lib::overlay::{
     close_overlay_windows as close_session_windows,
     create_overlay_windows as create_session_windows,
-    overlay_info_for_label as session_overlay_info, OverlayError, OverlayWindowCloser,
-    OverlayWindowFactory, PhysicalRectDto,
+    overlay_info_for_label as session_overlay_info, reveal_overlay_windows, OverlayError,
+    OverlayWindowCloser, OverlayWindowFactory, PhysicalRectDto,
 };
 
 fn create_overlay_windows(
@@ -129,6 +129,23 @@ fn close_waits_for_verified_removal_and_reports_failures() {
         Err(OverlayError::CloseTimeout(_))
     ));
     assert_eq!(timeout.waits, 100);
+}
+
+#[test]
+fn ready_barrier_reveals_every_window_then_focuses_the_active_one() {
+    let labels = vec!["overlay-7-0".into(), "overlay-7-1".into()];
+    let mut closer = RecordingCloser::default();
+
+    reveal_overlay_windows(&mut closer, &labels, Some("overlay-7-1")).unwrap();
+
+    assert_eq!(
+        closer.events,
+        [
+            "show:overlay-7-0",
+            "show:overlay-7-1",
+            "refocus:overlay-7-1"
+        ]
+    );
 }
 
 #[test]
@@ -311,7 +328,6 @@ fn overlapping_displays_still_select_exactly_one_active_f9_window() {
 struct RecordingFactory {
     events: Vec<String>,
     fail_build: Option<String>,
-    fail_focus: bool,
     fail_cleanup: bool,
 }
 
@@ -320,14 +336,6 @@ impl OverlayWindowFactory for RecordingFactory {
         self.events.push(format!("build:{label}"));
         if self.fail_build.as_deref() == Some(label) {
             return Err(OverlayError::Window("scripted build failure".into()));
-        }
-        Ok(())
-    }
-
-    fn focus(&mut self, label: &str) -> Result<(), OverlayError> {
-        self.events.push(format!("focus:{label}"));
-        if self.fail_focus {
-            return Err(OverlayError::Window("scripted focus failure".into()));
         }
         Ok(())
     }
@@ -343,7 +351,7 @@ impl OverlayWindowFactory for RecordingFactory {
 }
 
 #[test]
-fn all_windows_build_before_exactly_one_active_f9_focus() {
+fn all_windows_build_hidden_before_the_ready_barrier() {
     let displays = vec![
         display("left", -1280, 1280, false),
         display("main", 0, 1920, true),
@@ -361,18 +369,11 @@ fn all_windows_build_before_exactly_one_active_f9_focus() {
 
     create_overlay_windows(&request, &displays, &mut factory).unwrap();
 
-    assert_eq!(
-        factory.events,
-        [
-            "build:overlay-1-0",
-            "build:overlay-1-1",
-            "focus:overlay-1-0"
-        ]
-    );
+    assert_eq!(factory.events, ["build:overlay-1-0", "build:overlay-1-1"]);
 }
 
 #[test]
-fn first_middle_and_focus_failures_cleanup_every_built_overlay() {
+fn first_and_middle_failures_cleanup_every_built_overlay() {
     let displays = vec![
         display("left", -1280, 1280, false),
         display("main", 0, 1920, true),
@@ -409,22 +410,6 @@ fn first_middle_and_focus_failures_cleanup_every_built_overlay() {
         assert!(create_overlay_windows(&request, &displays, &mut factory).is_err());
         assert_eq!(factory.events, expected);
     }
-
-    let mut factory = RecordingFactory {
-        fail_focus: true,
-        ..Default::default()
-    };
-    assert!(create_overlay_windows(&request, &displays, &mut factory).is_err());
-    assert_eq!(
-        factory.events,
-        [
-            "build:overlay-1-0",
-            "build:overlay-1-1",
-            "focus:overlay-1-0",
-            "cleanup:overlay-1-1",
-            "cleanup:overlay-1-0"
-        ]
-    );
 }
 
 #[test]
@@ -443,7 +428,7 @@ fn startup_failure_attempts_every_cleanup_and_aggregates_cleanup_errors() {
         }),
     );
     let mut factory = RecordingFactory {
-        fail_focus: true,
+        fail_build: Some("overlay-1-1".into()),
         fail_cleanup: true,
         ..Default::default()
     };

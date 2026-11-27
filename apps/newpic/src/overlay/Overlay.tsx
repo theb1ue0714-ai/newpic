@@ -150,6 +150,7 @@ export function Overlay() {
               ? fixedInitialRect(info, displayBounds)
               : undefined,
         });
+        await invoke('overlay_ready');
       } catch {
         // Ignored when running outside Tauri or in headless tests.
       }

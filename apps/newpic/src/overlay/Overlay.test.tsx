@@ -77,6 +77,7 @@ describe('capture overlay', () => {
     render(<Overlay />);
 
     const cutout = await screen.findByTestId('selection-cutout');
+    expect(invokeMock).toHaveBeenCalledWith('overlay_ready');
     expect(cutout).toHaveStyle({
       left: '100px',
       top: '150px',
@@ -293,6 +294,7 @@ describe('capture overlay', () => {
     fireEvent.keyDown(window, { key: 'Escape' });
 
     expect(invokeMock).toHaveBeenCalledWith('cancel_selection');
+    expect(invokeMock).not.toHaveBeenCalledWith('overlay_ready');
     expect(invokeMock).not.toHaveBeenCalledWith('complete_selection', expect.anything());
   });
 

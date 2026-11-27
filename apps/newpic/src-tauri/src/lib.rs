@@ -45,6 +45,7 @@ pub fn run() {
             commands::get_diagnostics,
             commands::open_permission_settings,
             commands::get_overlay_info,
+            commands::overlay_ready,
             commands::complete_selection,
             commands::cancel_selection,
         ])

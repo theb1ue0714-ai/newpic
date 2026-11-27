@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::Duration;
 use tauri::{AppHandle, Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
 
@@ -8,6 +9,7 @@ pub use crate::app_state::{CaptureAction, PhysicalRectDto, SelectionMode, Select
 use crate::diagnostics::EventLevel;
 
 pub const OVERLAY_WINDOW_PREFIX: &str = "overlay-";
+pub const OVERLAY_READY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum OverlayError {
@@ -50,16 +52,20 @@ pub struct OverlayCoordinator {
     last_region: Option<PhysicalRect>,
     next_session_id: u64,
     active_session_id: Option<u64>,
+    ready_labels: HashSet<String>,
+    overlay_revealed: bool,
 }
 
 impl OverlayCoordinator {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             active_request: None,
             active_displays: Vec::new(),
             last_region: None,
             next_session_id: 0,
             active_session_id: None,
+            ready_labels: HashSet::new(),
+            overlay_revealed: false,
         }
     }
 
@@ -87,6 +93,8 @@ impl OverlayCoordinator {
         self.active_displays = displays;
         self.next_session_id = self.next_session_id.wrapping_add(1).max(1);
         self.active_session_id = Some(self.next_session_id);
+        self.ready_labels.clear();
+        self.overlay_revealed = false;
         Ok(self.next_session_id)
     }
 
@@ -138,10 +146,41 @@ impl OverlayCoordinator {
         Ok(())
     }
 
+    /// Records one webview as initialized. Returns `true` exactly once, when
+    /// every window in the session is ready to be revealed together.
+    pub fn mark_overlay_ready(&mut self, label: &str) -> Result<bool, OverlayError> {
+        self.validate_caller(label, false)?;
+        if self.overlay_revealed {
+            return Ok(false);
+        }
+        self.ready_labels.insert(label.to_owned());
+        if self.ready_labels.len() == self.active_displays.len() {
+            self.overlay_revealed = true;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Cancels a startup that never reached the ready barrier. A stale
+    /// watchdog cannot cancel a newer session.
+    pub fn expire_unready_session(&mut self, session_id: u64) -> Option<ExpiredOverlaySession> {
+        if self.active_session_id != Some(session_id) || self.overlay_revealed {
+            return None;
+        }
+        let expired = ExpiredOverlaySession {
+            labels: self.overlay_labels(),
+            active_label: self.active_overlay_label(),
+        };
+        self.cancel();
+        Some(expired)
+    }
+
     pub fn cancel(&mut self) {
         self.active_request = None;
         self.active_displays.clear();
         self.active_session_id = None;
+        self.ready_labels.clear();
+        self.overlay_revealed = false;
         // Preserves last_region for F8 repeat
     }
 
@@ -152,6 +191,8 @@ impl OverlayCoordinator {
             .ok_or(OverlayError::NoActiveSelection)?;
         self.active_displays.clear();
         self.active_session_id = None;
+        self.ready_labels.clear();
+        self.overlay_revealed = false;
         if request.action == CaptureAction::Region {
             self.last_region = Some(rect);
         }
@@ -174,19 +215,25 @@ impl OverlayCoordinator {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpiredOverlaySession {
+    pub labels: Vec<String>,
+    pub active_label: Option<String>,
+}
+
 pub fn start_overlay_session(
     coordinator: &mut OverlayCoordinator,
     request: SelectionRequest,
     displays: Vec<Display>,
     open: impl FnOnce(u64, &SelectionRequest, &[Display]) -> Result<(), OverlayError>,
-) -> Result<(), OverlayError> {
+) -> Result<u64, OverlayError> {
     let session_id =
         coordinator.start_selection_with_displays(request.clone(), displays.clone())?;
     if let Err(error) = open(session_id, &request, &displays) {
         coordinator.cancel();
         return Err(error);
     }
-    Ok(())
+    Ok(session_id)
 }
 
 pub fn overlay_label(session_id: u64, index: usize) -> String {
@@ -273,7 +320,6 @@ pub fn overlay_info_for_label(
 
 pub trait OverlayWindowFactory {
     fn build(&mut self, label: &str, display: &Display) -> Result<(), OverlayError>;
-    fn focus(&mut self, label: &str) -> Result<(), OverlayError>;
     fn cleanup(&mut self, label: &str) -> Result<(), OverlayError>;
 }
 
@@ -313,17 +359,7 @@ pub fn create_overlay_windows(
     }
 
     if request.mode == SelectionMode::FixedSize {
-        let active = match active_fixed_display_index(request, displays) {
-            Ok(active) => active,
-            Err(error) => {
-                return Err(cleanup_after_failure(
-                    factory,
-                    built.into_iter().rev(),
-                    error,
-                ));
-            }
-        };
-        if let Err(error) = factory.focus(&overlay_label(session_id, active)) {
+        if let Err(error) = active_fixed_display_index(request, displays) {
             return Err(cleanup_after_failure(
                 factory,
                 built.into_iter().rev(),
@@ -353,6 +389,7 @@ impl<R: Runtime> OverlayWindowFactory for TauriOverlayWindowFactory<'_, R> {
             .maximizable(false)
             .always_on_top(true)
             .skip_taskbar(true)
+            .visible(false)
             .position(bounds.left() as f64 / scale, bounds.top() as f64 / scale)
             .inner_size(
                 bounds.size().width() as f64 / scale,
@@ -360,16 +397,6 @@ impl<R: Runtime> OverlayWindowFactory for TauriOverlayWindowFactory<'_, R> {
             )
             .build()
             .map(|_| ())
-            .map_err(|error| OverlayError::Window(error.to_string()))
-    }
-
-    fn focus(&mut self, label: &str) -> Result<(), OverlayError> {
-        let window = self
-            .app
-            .get_webview_window(label)
-            .ok_or_else(|| OverlayError::Window(format!("missing built overlay {label}")))?;
-        window
-            .set_focus()
             .map_err(|error| OverlayError::Window(error.to_string()))
     }
 
@@ -417,6 +444,28 @@ pub fn open_overlays<R: Runtime>(
         return Err(error);
     }
     Ok(())
+}
+
+pub fn reveal_overlay_windows(
+    closer: &mut impl OverlayWindowCloser,
+    labels: &[String],
+    active_label: Option<&str>,
+) -> Result<(), OverlayError> {
+    for label in labels {
+        closer.show(label)?;
+    }
+    if let Some(label) = active_label {
+        closer.focus(label)?;
+    }
+    Ok(())
+}
+
+pub fn reveal_overlays<R: Runtime>(
+    app: &AppHandle<R>,
+    labels: &[String],
+    active_label: Option<&str>,
+) -> Result<(), OverlayError> {
+    reveal_overlay_windows(&mut TauriOverlayWindowCloser { app }, labels, active_label)
 }
 
 pub trait OverlayWindowCloser {

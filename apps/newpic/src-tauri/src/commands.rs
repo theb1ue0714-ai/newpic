@@ -127,6 +127,36 @@ pub fn get_overlay_info<R: Runtime>(
     .map_err(CommandError::new)
 }
 
+#[tauri::command]
+pub fn overlay_ready<R: Runtime>(
+    app: AppHandle<R>,
+    window: WebviewWindow<R>,
+    state: State<'_, AppState>,
+) -> Result<(), CommandError> {
+    let (labels, active_label, reveal) = {
+        let mut coordinator = lock(&state.overlay);
+        let reveal = coordinator
+            .mark_overlay_ready(window.label())
+            .map_err(CommandError::new)?;
+        (
+            coordinator.overlay_labels(),
+            coordinator.active_overlay_label(),
+            reveal,
+        )
+    };
+    if !reveal {
+        return Ok(());
+    }
+
+    if let Err(error) = overlay::reveal_overlays(&app, &labels, active_label.as_deref()) {
+        let _ = overlay::close_overlays(&app, &labels, active_label.as_deref());
+        lock(&state.overlay).cancel();
+        state.record(EventLevel::Error, format!("overlay reveal failed: {error}"));
+        return Err(CommandError::new(error));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommittedSelection {
     pub request: SelectionRequest,
@@ -521,22 +551,55 @@ pub fn run_action<R: Runtime>(app: &AppHandle<R>, action: CaptureAction) {
                     overlay::open_overlays(app, session_id, request, displays)
                 },
             );
-            if let Err(error) = result {
-                let level = if error == OverlayError::AlreadyActive {
-                    EventLevel::Warning
-                } else {
-                    EventLevel::Error
-                };
-                state.record(level, format!("overlay startup failed: {error}"));
-                if error == OverlayError::AlreadyActive {
-                    notify(
-                        app,
-                        &Notice {
-                            title: "캡처 진행 중".to_owned(),
-                            body: "이미 캡처 또는 영역 선택이 진행 중입니다.".to_owned(),
-                            level,
-                        },
-                    );
+            match result {
+                Err(error) => {
+                    let level = if error == OverlayError::AlreadyActive {
+                        EventLevel::Warning
+                    } else {
+                        EventLevel::Error
+                    };
+                    state.record(level, format!("overlay startup failed: {error}"));
+                    if error == OverlayError::AlreadyActive {
+                        notify(
+                            app,
+                            &Notice {
+                                title: "캡처 진행 중".to_owned(),
+                                body: "이미 캡처 또는 영역 선택이 진행 중입니다.".to_owned(),
+                                level,
+                            },
+                        );
+                    }
+                }
+                Ok(session_id) => {
+                    let app = app.clone();
+                    thread::spawn(move || {
+                        thread::sleep(overlay::OVERLAY_READY_TIMEOUT);
+                        let state = app.state::<AppState>();
+                        let expired = lock(&state.overlay).expire_unready_session(session_id);
+                        if let Some(expired) = expired {
+                            let close_result = overlay::close_overlays(
+                                &app,
+                                &expired.labels,
+                                expired.active_label.as_deref(),
+                            );
+                            let detail = close_result
+                                .err()
+                                .map_or_else(String::new, |error| format!(" ({error})"));
+                            let message = format!(
+                                "overlay startup timed out before the webview was ready{detail}"
+                            );
+                            state.record(EventLevel::Error, message);
+                            notify(
+                                &app,
+                                &Notice {
+                                    title: "영역 선택 시작 실패".to_owned(),
+                                    body: "캡처 화면을 준비하지 못해 자동으로 닫았습니다. F7을 다시 눌러 주세요."
+                                        .to_owned(),
+                                    level: EventLevel::Error,
+                                },
+                            );
+                        }
+                    });
                 }
             }
         }

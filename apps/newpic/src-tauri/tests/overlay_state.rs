@@ -510,6 +510,49 @@ fn overlay_coordinator_rejects_concurrent_selection() {
 }
 
 #[test]
+fn overlay_reveals_once_only_after_every_window_reports_ready() {
+    let displays = vec![
+        test_display("left", -1280, 0, 1280, 1024, 1.25, false),
+        test_display("main", 0, 0, 1920, 1080, 1.0, true),
+    ];
+    let mut coordinator = OverlayCoordinator::new();
+    let session = coordinator
+        .start_selection_with_displays(request(CaptureAction::Region, None), displays)
+        .unwrap();
+
+    assert!(!coordinator
+        .mark_overlay_ready(&format!("overlay-{session}-0"))
+        .unwrap());
+    assert!(!coordinator
+        .mark_overlay_ready(&format!("overlay-{session}-0"))
+        .unwrap());
+    assert!(coordinator
+        .mark_overlay_ready(&format!("overlay-{session}-1"))
+        .unwrap());
+    assert!(!coordinator
+        .mark_overlay_ready(&format!("overlay-{session}-1"))
+        .unwrap());
+}
+
+#[test]
+fn unready_overlay_session_expires_and_allows_the_next_f7() {
+    let displays = vec![test_display("main", 0, 0, 1920, 1080, 1.0, true)];
+    let mut coordinator = OverlayCoordinator::new();
+    let session = coordinator
+        .start_selection_with_displays(request(CaptureAction::Region, None), displays.clone())
+        .unwrap();
+
+    let expired = coordinator.expire_unready_session(session).unwrap();
+    assert_eq!(expired.labels, [format!("overlay-{session}-0")]);
+    assert!(!coordinator.is_active());
+    assert!(coordinator.expire_unready_session(session).is_none());
+
+    coordinator
+        .start_selection_with_displays(request(CaptureAction::Region, None), displays)
+        .unwrap();
+}
+
+#[test]
 fn selection_session_keeps_one_display_snapshot_and_cancels_on_open_failure() {
     let original = vec![
         test_display("left", -1280, 0, 1280, 1024, 1.25, false),
